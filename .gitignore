@@ -2,3 +2,6 @@
 .zig-cache/
 zig-out/
 *.o
+
+# Ignore tungsten's zig install
+zig-pkg/
