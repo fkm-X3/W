@@ -1,0 +1,4 @@
+# Zig ignore
+.zig-cache/
+zig-out/
+*.o
