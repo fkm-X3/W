@@ -31,12 +31,6 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
-        .Tungsten = .{
-            .url = "git+https://github.com/fkm-X3/Tungsten.git?ref=HEAD#aed757e74149c9ce22aa5382906b7fdad9f2ad5b",
-            .hash = "Tungsten-0.0.0-UhN7yEIFAgDoK2G5MePnC1uo1qJwpyueTTibUrqH7qOf",
-        },
-    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

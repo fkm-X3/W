@@ -83,13 +83,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const update_cmd = b.addSystemCommand(&.{
-        "zig", "fetch", "--save", "git+https://github.com/fkm-X3/Tungsten.git#HEAD",
-    });
-    
-    const update_step = b.step("update", "Fetch the latest HEAD for dependencies");
-    update_step.dependOn(&update_cmd.step);
-
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
