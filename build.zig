@@ -29,15 +29,12 @@ pub fn build(b: *std.Build) void {
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
     const mod = b.addModule("W", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
         .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
+        .target = target,
+    });
+
+    const compiler_mod = b.addModule("compiler", .{
+        .root_source_file = b.path("compiler/root.zig"),
         .target = target,
     });
 
@@ -73,12 +70,8 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                // Here "W" is the name you will use in your source code to
-                // import this module (e.g. `@import("W")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
                 .{ .name = "W", .module = mod },
+                .{ .name = "compiler", .module = compiler_mod },
             },
         }),
     });
@@ -135,12 +128,19 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    // Compiler module tests
+    const compiler_tests = b.addTest(.{
+        .root_module = compiler_mod,
+    });
+    const run_compiler_tests = b.addRunArtifact(compiler_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_compiler_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
