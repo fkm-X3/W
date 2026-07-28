@@ -142,6 +142,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_compiler_tests.step);
 
+    const test_compiler_step = b.step("test-compiler", "Run compiler tests");
+    test_compiler_step.dependOn(&run_compiler_tests.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

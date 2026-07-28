@@ -1,0 +1,733 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const token_mod = @import("token.zig");
+const TokenTag = token_mod.TokenTag;
+const Token = token_mod.Token;
+
+pub const Lexer = struct {
+    source: []const u8,
+    pos: u32,
+    tokens: std.ArrayListUnmanaged(Token),
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, source: []const u8) Lexer {
+        return .{
+            .source = source,
+            .pos = 0,
+            .tokens = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Lexer) void {
+        self.tokens.deinit(self.allocator);
+    }
+
+    pub fn tokenize(self: *Lexer) ![]Token {
+        while (self.pos < self.source.len) {
+            const ch = self.source[self.pos];
+
+            if (std.ascii.isWhitespace(ch)) {
+                self.pos += 1;
+                continue;
+            }
+
+            if (ch == '/' and self.peek(1) == '/') {
+                self.skipLineComment();
+                continue;
+            }
+
+            if (ch == '/' and self.peek(1) == '*') {
+                try self.skipBlockComment();
+                continue;
+            }
+
+            if (std.ascii.isDigit(ch) or (ch == '.' and std.ascii.isDigit(self.peek(1)))) {
+                try self.scanNumber();
+                continue;
+            }
+
+            if (ch == '"' or ch == '\'') {
+                try self.scanString(ch);
+                continue;
+            }
+
+            if (std.ascii.isAlphabetic(ch) or ch == '_') {
+                try self.scanIdentifier();
+                continue;
+            }
+
+            try self.scanOperator();
+        }
+
+        try self.tokens.append(self.allocator, .{
+            .tag = .eof,
+            .start = self.pos,
+            .end = self.pos,
+        });
+
+        return self.tokens.items;
+    }
+
+    fn peek(self: *const Lexer, offset: u32) u8 {
+        const idx = self.pos + offset;
+        if (idx >= self.source.len) return 0;
+        return self.source[idx];
+    }
+
+    fn advance(self: *Lexer) u8 {
+        const ch = self.source[self.pos];
+        self.pos += 1;
+        return ch;
+    }
+
+    fn skipLineComment(self: *Lexer) void {
+        while (self.pos < self.source.len and self.source[self.pos] != '\n') {
+            self.pos += 1;
+        }
+    }
+
+    fn skipBlockComment(self: *Lexer) !void {
+        self.pos += 2;
+        var depth: u32 = 1;
+        while (self.pos < self.source.len and depth > 0) {
+            const ch = self.source[self.pos];
+            if (ch == '/' and self.peek(1) == '*') {
+                depth += 1;
+                self.pos += 2;
+            } else if (ch == '*' and self.peek(1) == '/') {
+                depth -= 1;
+                self.pos += 2;
+            } else {
+                self.pos += 1;
+            }
+        }
+        if (depth > 0) {
+            return error.UnterminatedBlockComment;
+        }
+    }
+
+    fn scanNumber(self: *Lexer) !void {
+        const start = self.pos;
+
+        if (self.source[self.pos] == '0' and self.peek(1) == 'x') {
+            self.pos += 2;
+            while (self.pos < self.source.len and std.ascii.isHex(self.source[self.pos])) {
+                self.pos += 1;
+            }
+        } else if (self.source[self.pos] == '0' and self.peek(1) == 'b') {
+            self.pos += 2;
+            while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1')) {
+                self.pos += 1;
+            }
+        } else {
+            while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
+                self.pos += 1;
+            }
+            if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                self.pos += 1;
+                while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
+                    self.pos += 1;
+                }
+            }
+            if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
+                self.pos += 1;
+                if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
+                    self.pos += 1;
+                }
+                while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
+                    self.pos += 1;
+                }
+            }
+        }
+
+        const is_float = std.mem.indexOfScalar(u8, self.source[start..self.pos], '.') != null or
+            std.mem.indexOfScalar(u8, self.source[start..self.pos], 'e') != null or
+            std.mem.indexOfScalar(u8, self.source[start..self.pos], 'E') != null;
+
+        try self.tokens.append(self.allocator, .{
+            .tag = if (is_float) .float_literal else .int_literal,
+            .start = start,
+            .end = self.pos,
+        });
+    }
+
+    fn scanString(self: *Lexer, quote: u8) !void {
+        const start = self.pos;
+        self.pos += 1;
+
+        while (self.pos < self.source.len) {
+            const ch = self.source[self.pos];
+            if (ch == '\\') {
+                self.pos += 2;
+            } else if (ch == quote) {
+                self.pos += 1;
+                break;
+            } else if (ch == '\n') {
+                return error.UnterminatedString;
+            } else {
+                self.pos += 1;
+            }
+        }
+
+        const tag: TokenTag = if (quote == '"') .string_literal else .char_literal;
+        try self.tokens.append(self.allocator, .{
+            .tag = tag,
+            .start = start,
+            .end = self.pos,
+        });
+    }
+
+    fn scanIdentifier(self: *Lexer) !void {
+        const start = self.pos;
+        while (self.pos < self.source.len and (std.ascii.isAlphanumeric(self.source[self.pos]) or self.source[self.pos] == '_')) {
+            self.pos += 1;
+        }
+
+        const ident = self.source[start..self.pos];
+        const tag = token_mod.lookupKeyword(ident) orelse .identifier;
+
+        try self.tokens.append(self.allocator, .{
+            .tag = tag,
+            .start = start,
+            .end = self.pos,
+        });
+    }
+
+    fn scanOperator(self: *Lexer) !void {
+        const ch = self.source[self.pos];
+        const start = self.pos;
+
+        const tag: TokenTag = switch (ch) {
+            '+' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .plus_eq;
+            } else .plus,
+            '-' => if (self.peek(1) == '>') blk: {
+                self.pos += 1;
+                break :blk .arrow;
+            } else if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .minus_eq;
+            } else .minus,
+            '*' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .star_eq;
+            } else .star,
+            '/' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .slash_eq;
+            } else .slash,
+            '%' => .percent,
+            '&' => if (self.peek(1) == '&') blk: {
+                self.pos += 1;
+                break :blk .amp_amp;
+            } else .amp,
+            '|' => if (self.peek(1) == '|') blk: {
+                self.pos += 1;
+                break :blk .pipe_pipe;
+            } else .pipe,
+            '^' => .caret,
+            '~' => .tilde,
+            '=' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .eq_eq;
+            } else if (self.peek(1) == '>') blk: {
+                self.pos += 1;
+                break :blk .fat_arrow;
+            } else .eq,
+            '!' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .bang_eq;
+            } else .bang,
+            '<' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .lt_eq;
+            } else if (self.peek(1) == '<') blk: {
+                self.pos += 1;
+                break :blk .lshift;
+            } else .lt,
+            '>' => if (self.peek(1) == '=') blk: {
+                self.pos += 1;
+                break :blk .gt_eq;
+            } else if (self.peek(1) == '>') blk: {
+                self.pos += 1;
+                break :blk .rshift;
+            } else .gt,
+            '(' => .lparen,
+            ')' => .rparen,
+            '{' => .lbrace,
+            '}' => .rbrace,
+            '[' => .lbracket,
+            ']' => .rbracket,
+            ':' => .colon,
+            ';' => .semicolon,
+            ',' => .comma,
+            '.' => .dot,
+            '_' => .underscore,
+            else => .invalid,
+        };
+
+        self.pos += 1;
+        try self.tokens.append(self.allocator, .{
+            .tag = tag,
+            .start = start,
+            .end = self.pos,
+        });
+    }
+};
+
+test "lexer: empty input" {
+    var lexer = Lexer.init(std.testing.allocator, "");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(TokenTag.eof, tokens[0].tag);
+}
+
+test "lexer: integers" {
+    var lexer = Lexer.init(std.testing.allocator, "42 0 123 0xFF 0b1010");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 6), tokens.len);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[5].tag);
+
+    try std.testing.expectEqualStrings("42", tokens[0].lexeme(lexer.source));
+    try std.testing.expectEqualStrings("0xFF", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqualStrings("0b1010", tokens[4].lexeme(lexer.source));
+}
+
+test "lexer: floats" {
+    var lexer = Lexer.init(std.testing.allocator, "3.14 1e10 2.5e-3");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
+    try std.testing.expectEqual(TokenTag.float_literal, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.float_literal, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.float_literal, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[3].tag);
+
+    try std.testing.expectEqualStrings("3.14", tokens[0].lexeme(lexer.source));
+    try std.testing.expectEqualStrings("1e10", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqualStrings("2.5e-3", tokens[2].lexeme(lexer.source));
+}
+
+test "lexer: string literals" {
+    var lexer = Lexer.init(std.testing.allocator, "\"hello\" 'c' \"line1\\nline2\"");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
+    try std.testing.expectEqual(TokenTag.string_literal, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.char_literal, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.string_literal, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[3].tag);
+
+    try std.testing.expectEqualStrings("\"hello\"", tokens[0].lexeme(lexer.source));
+    try std.testing.expectEqualStrings("'c'", tokens[1].lexeme(lexer.source));
+}
+
+test "lexer: identifiers and keywords" {
+    var lexer = Lexer.init(std.testing.allocator, "fn return struct class");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 5), tokens.len);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.return_kw, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.struct_kw, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.class_kw, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[4].tag);
+}
+
+test "lexer: mixed identifiers and keywords" {
+    var lexer = Lexer.init(std.testing.allocator, "fn add(a: i32) -> i32");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("add", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.lparen, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[3].tag);
+    try std.testing.expectEqualStrings("a", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.colon, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[5].tag);
+    try std.testing.expectEqualStrings("i32", tokens[5].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.rparen, tokens[6].tag);
+    try std.testing.expectEqual(TokenTag.arrow, tokens[7].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[8].tag);
+    try std.testing.expectEqualStrings("i32", tokens[8].lexeme(lexer.source));
+}
+
+test "lexer: operators" {
+    var lexer = Lexer.init(std.testing.allocator, "+ - * / % == != < > <= >= && || << >> += -= *= /= -> => = ! & | ^ ~");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(TokenTag.plus, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.minus, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.star, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.slash, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.percent, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.eq_eq, tokens[5].tag);
+    try std.testing.expectEqual(TokenTag.bang_eq, tokens[6].tag);
+    try std.testing.expectEqual(TokenTag.lt, tokens[7].tag);
+    try std.testing.expectEqual(TokenTag.gt, tokens[8].tag);
+    try std.testing.expectEqual(TokenTag.lt_eq, tokens[9].tag);
+    try std.testing.expectEqual(TokenTag.gt_eq, tokens[10].tag);
+    try std.testing.expectEqual(TokenTag.amp_amp, tokens[11].tag);
+    try std.testing.expectEqual(TokenTag.pipe_pipe, tokens[12].tag);
+    try std.testing.expectEqual(TokenTag.lshift, tokens[13].tag);
+    try std.testing.expectEqual(TokenTag.rshift, tokens[14].tag);
+    try std.testing.expectEqual(TokenTag.plus_eq, tokens[15].tag);
+    try std.testing.expectEqual(TokenTag.minus_eq, tokens[16].tag);
+    try std.testing.expectEqual(TokenTag.star_eq, tokens[17].tag);
+    try std.testing.expectEqual(TokenTag.slash_eq, tokens[18].tag);
+    try std.testing.expectEqual(TokenTag.arrow, tokens[19].tag);
+    try std.testing.expectEqual(TokenTag.fat_arrow, tokens[20].tag);
+    try std.testing.expectEqual(TokenTag.eq, tokens[21].tag);
+    try std.testing.expectEqual(TokenTag.bang, tokens[22].tag);
+    try std.testing.expectEqual(TokenTag.amp, tokens[23].tag);
+    try std.testing.expectEqual(TokenTag.pipe, tokens[24].tag);
+    try std.testing.expectEqual(TokenTag.caret, tokens[25].tag);
+    try std.testing.expectEqual(TokenTag.tilde, tokens[26].tag);
+}
+
+test "lexer: delimiters" {
+    var lexer = Lexer.init(std.testing.allocator, "( ) { } [ ] : ; , . _");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(TokenTag.lparen, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.rparen, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.lbrace, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.rbrace, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.lbracket, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.rbracket, tokens[5].tag);
+    try std.testing.expectEqual(TokenTag.colon, tokens[6].tag);
+    try std.testing.expectEqual(TokenTag.semicolon, tokens[7].tag);
+    try std.testing.expectEqual(TokenTag.comma, tokens[8].tag);
+    try std.testing.expectEqual(TokenTag.dot, tokens[9].tag);
+    try std.testing.expectEqual(TokenTag.underscore, tokens[10].tag);
+}
+
+test "lexer: line comments" {
+    var lexer = Lexer.init(std.testing.allocator, "fn // this is a comment\nadd");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("add", tokens[1].lexeme(lexer.source));
+}
+
+test "lexer: block comments" {
+    var lexer = Lexer.init(std.testing.allocator, "fn /* comment */ add");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("add", tokens[1].lexeme(lexer.source));
+}
+
+test "lexer: nested block comments" {
+    var lexer = Lexer.init(std.testing.allocator, "fn /* a /* b */ c */ add");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("add", tokens[1].lexeme(lexer.source));
+}
+
+test "lexer: unterminated block comment" {
+    var lexer = Lexer.init(std.testing.allocator, "fn /* unterminated");
+    defer lexer.deinit();
+
+    try std.testing.expectError(error.UnterminatedBlockComment, lexer.tokenize());
+}
+
+test "lexer: unterminated string" {
+    var lexer = Lexer.init(std.testing.allocator, "\"unterminated");
+    defer lexer.deinit();
+
+    try std.testing.expectError(error.UnterminatedString, lexer.tokenize());
+}
+
+test "lexer: struct definition" {
+    const source =
+        \\struct Vec2 {
+        \\    x: f64
+        \\    y: f64
+        \\
+        \\    fn add(self: *Vec2, other: *Vec2) -> Vec2 {
+        \\        return Vec2{ .x = self.x + other.x, .y = self.y + other.y }
+        \\    }
+        \\
+        \\    fn zero() -> Vec2 {
+        \\        return Vec2{ .x = 0.0, .y = 0.0 }
+        \\    }
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 10);
+    try std.testing.expectEqual(TokenTag.struct_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("Vec2", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.lbrace, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[3].tag);
+    try std.testing.expectEqualStrings("x", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.colon, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[5].tag);
+    try std.testing.expectEqualStrings("f64", tokens[5].lexeme(lexer.source));
+}
+
+test "lexer: class definition" {
+    const source =
+        \\class Dog(Animal) {
+        \\    breed: String
+        \\
+        \\    fn init(name: String, breed: String) -> Dog {
+        \\        let base := Animal.init(name)
+        \\        return Dog{ .name = base.name, .breed = breed }
+        \\    }
+        \\
+        \\    override fn speak(self: *Dog) -> String {
+        \\        return "Woof!"
+        \\    }
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 10);
+    try std.testing.expectEqual(TokenTag.class_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("Dog", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.lparen, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[3].tag);
+    try std.testing.expectEqualStrings("Animal", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.rparen, tokens[4].tag);
+}
+
+test "lexer: enum definition" {
+    const source =
+        \\enum Option[T] {
+        \\    Some(T)
+        \\    None
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 5);
+    try std.testing.expectEqual(TokenTag.enum_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("Option", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.lbracket, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[3].tag);
+    try std.testing.expectEqualStrings("T", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.rbracket, tokens[4].tag);
+}
+
+test "lexer: interface definition" {
+    const source =
+        \\interface Speakable {
+        \\    fn speak(self: *Self) -> String
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 5);
+    try std.testing.expectEqual(TokenTag.interface_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("Speakable", tokens[1].lexeme(lexer.source));
+}
+
+test "lexer: for loop" {
+    const source =
+        \\for i in 0..10 {
+        \\    print(i)
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 5);
+    try std.testing.expectEqual(TokenTag.for_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("i", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.in_kw, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[3].tag);
+    try std.testing.expectEqualStrings("0", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.dot, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.dot, tokens[5].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[6].tag);
+    try std.testing.expectEqualStrings("10", tokens[6].lexeme(lexer.source));
+}
+
+test "lexer: match expression" {
+    const source =
+        \\match result {
+        \\    Ok(v) => print(v),
+        \\    Err(e) => print(e),
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 10);
+    try std.testing.expectEqual(TokenTag.match_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("result", tokens[1].lexeme(lexer.source));
+}
+
+test "lexer: complete program" {
+    const source =
+        \\fn main() -> i32 {
+        \\    let x: i32 = 42
+        \\    let y: f64 = 3.14
+        \\    if x > 0 {
+        \\        return x
+        \\    } else {
+        \\        return -x
+        \\    }
+        \\}
+    ;
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 20);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("main", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.lparen, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.rparen, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.arrow, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[5].tag);
+    try std.testing.expectEqualStrings("i32", tokens[5].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.lbrace, tokens[6].tag);
+}
+
+test "lexer: multiple statements" {
+    const source = "let x: i32 = 42\nlet y: f64 = 3.14\nreturn x + y";
+
+    var lexer = Lexer.init(std.testing.allocator, source);
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expect(tokens.len > 15);
+    try std.testing.expectEqual(TokenTag.let_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("x", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.colon, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[3].tag);
+    try std.testing.expectEqualStrings("i32", tokens[3].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.eq, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.int_literal, tokens[5].tag);
+    try std.testing.expectEqualStrings("42", tokens[5].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.let_kw, tokens[6].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[7].tag);
+    try std.testing.expectEqualStrings("y", tokens[7].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.colon, tokens[8].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[9].tag);
+    try std.testing.expectEqualStrings("f64", tokens[9].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.eq, tokens[10].tag);
+    try std.testing.expectEqual(TokenTag.float_literal, tokens[11].tag);
+    try std.testing.expectEqualStrings("3.14", tokens[11].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.return_kw, tokens[12].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[13].tag);
+    try std.testing.expectEqualStrings("x", tokens[13].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.plus, tokens[14].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[15].tag);
+    try std.testing.expectEqualStrings("y", tokens[15].lexeme(lexer.source));
+}
+
+test "lexer: edge case - single dot" {
+    var lexer = Lexer.init(std.testing.allocator, ".");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqual(TokenTag.dot, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[1].tag);
+}
+
+test "lexer: edge case - consecutive operators" {
+    var lexer = Lexer.init(std.testing.allocator, "===!=<<>>==>>");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(TokenTag.eq_eq, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.eq, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.bang_eq, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.lshift, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.rshift, tokens[4].tag);
+    try std.testing.expectEqual(TokenTag.eq_eq, tokens[5].tag);
+    try std.testing.expectEqual(TokenTag.rshift, tokens[6].tag);
+}
+
+test "lexer: whitespace handling" {
+    var lexer = Lexer.init(std.testing.allocator, "  \t\n  \r\n  fn  ");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[1].tag);
+}
+
+test "lexer: underscore identifiers" {
+    var lexer = Lexer.init(std.testing.allocator, "_foo _bar _");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[0].tag);
+    try std.testing.expectEqualStrings("_foo", tokens[0].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
+    try std.testing.expectEqualStrings("_bar", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.identifier, tokens[2].tag);
+    try std.testing.expectEqualStrings("_", tokens[2].lexeme(lexer.source));
+}
+
+test "lexer: escape sequences in strings" {
+    var lexer = Lexer.init(std.testing.allocator, "\"tab\\there\" 'a'");
+    defer lexer.deinit();
+
+    const tokens = try lexer.tokenize();
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(TokenTag.string_literal, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.char_literal, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[2].tag);
+}
