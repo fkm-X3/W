@@ -1,0 +1,207 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "w",
+	"patterns": [
+		{ "include": "#comments" },
+		{ "include": "#strings" },
+		{ "include": "#numbers" },
+		{ "include": "#keywords" },
+		{ "include": "#storage" },
+		{ "include": "#constants" },
+		{ "include": "#function-definition" },
+		{ "include": "#types" },
+		{ "include": "#struct-literal-field" },
+		{ "include": "#operators" }
+	],
+	"repository": {
+		"comments": {
+			"patterns": [
+				{
+					"name": "comment.line.double-slash.w",
+					"match": "//.*$"
+				}
+			]
+		},
+		"strings": {
+			"name": "string.quoted.double.w",
+			"begin": "\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.w",
+					"match": "\\\\."
+				}
+			]
+		},
+		"numbers": {
+			"patterns": [
+				{
+					"name": "constant.numeric.float.w",
+					"match": "\\b[0-9]+\\.[0-9]+\\b"
+				},
+				{
+					"name": "constant.numeric.integer.w",
+					"match": "\\b[0-9]+\\b"
+				},
+				{
+					"name": "constant.numeric.range.w",
+					"match": "\\.\\."
+				}
+			]
+		},
+		"keywords": {
+			"patterns": [
+				{
+					"name": "keyword.control.w",
+					"match": "\\b(if|else|while|for|in|return|match|defer)\\b"
+				},
+				{
+					"name": "keyword.control.import.w",
+					"match": "\\b(import|as)\\b"
+				}
+			]
+		},
+		"storage": {
+			"patterns": [
+				{
+					"name": "storage.type.function.w",
+					"match": "\\bfn\\b"
+				},
+				{
+					"name": "storage.type.w",
+					"match": "\\b(class|struct|enum|interface|impl|prop)\\b"
+				},
+				{
+					"name": "storage.modifier.w",
+					"match": "\\b(let|mut|override|get|impl)\\b"
+				}
+			]
+		},
+		"constants": {
+			"patterns": [
+				{
+					"name": "constant.language.boolean.w",
+					"match": "\\b(true|false)\\b"
+				},
+				{
+					"name": "variable.language.self.w",
+					"match": "\\bself\\b"
+				},
+				{
+					"name": "support.type.self.w",
+					"match": "\\bSelf\\b"
+				},
+				{
+					"name": "constant.other.discard.w",
+					"match": "\\b_\\b"
+				}
+			]
+		},
+		"function-definition": {
+			"patterns": [
+				{
+					"match": "\\bfn\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+					"captures": {
+						"1": {
+							"name": "entity.name.function.w"
+						}
+					}
+				}
+			]
+		},
+		"types": {
+			"patterns": [
+				{
+					"name": "support.type.primitive.w",
+					"match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|String|str|void)\\b"
+				},
+				{
+					"comment": "Capitalized identifiers are treated as type names (structs, classes, enums, interfaces)",
+					"name": "entity.name.type.w",
+					"match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+				}
+			]
+		},
+		"struct-literal-field": {
+			"patterns": [
+				{
+					"comment": "Struct literal field initializer, e.g. .name = value",
+					"match": "(\\.)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*=)",
+					"captures": {
+						"1": { "name": "punctuation.accessor.w" },
+						"2": { "name": "variable.other.member.w" }
+					}
+				}
+			]
+		},
+		"operators": {
+			"patterns": [
+				{
+					"name": "keyword.operator.arrow.w",
+					"match": "->|=>"
+				},
+				{
+					"name": "keyword.operator.assignment.infer.w",
+					"match": ":="
+				},
+				{
+					"name": "keyword.operator.comparison.w",
+					"match": "==|!=|<=|>=|<|>"
+				},
+				{
+					"name": "keyword.operator.logical.w",
+					"match": "&&|\\|\\||!"
+				},
+				{
+					"name": "keyword.operator.assignment.w",
+					"match": "="
+				},
+				{
+					"name": "keyword.operator.arithmetic.w",
+					"match": "\\+|\\-|\\*|/|%"
+				},
+				{
+					"name": "keyword.operator.address.w",
+					"match": "&|\\*"
+				},
+				{
+					"name": "punctuation.separator.colon.w",
+					"match": ":"
+				},
+				{
+					"name": "punctuation.separator.comma.w",
+					"match": ","
+				},
+				{
+					"name": "punctuation.accessor.w",
+					"match": "\\."
+				},
+				{
+					"name": "punctuation.definition.generic.begin.w",
+					"match": "\\["
+				},
+				{
+					"name": "punctuation.definition.generic.end.w",
+					"match": "\\]"
+				},
+				{
+					"name": "punctuation.section.braces.begin.w",
+					"match": "\\{"
+				},
+				{
+					"name": "punctuation.section.braces.end.w",
+					"match": "\\}"
+				},
+				{
+					"name": "punctuation.section.parens.begin.w",
+					"match": "\\("
+				},
+				{
+					"name": "punctuation.section.parens.end.w",
+					"match": "\\)"
+				}
+			]
+		}
+	},
+	"scopeName": "source.w"
+}

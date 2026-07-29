@@ -1,0 +1,25 @@
+{
+  "name": "w",
+  "displayName": ".w",
+  "description": "Language support for .w files",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.125.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [{
+      "id": "w",
+      "aliases": ["w", "w"],
+      "extensions": [".w"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "w",
+      "scopeName": "source.w",
+      "path": "./syntaxes/w.tmLanguage.json"
+    }]
+  }
+}
