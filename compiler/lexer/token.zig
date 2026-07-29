@@ -80,6 +80,7 @@ pub const TokenTag = enum(u8) {
     // Special
     eof,
     invalid,
+    newline,
 
     pub fn lexeme(self: TokenTag) []const u8 {
         return switch (self) {
@@ -153,6 +154,7 @@ pub const TokenTag = enum(u8) {
             .underscore => "_",
             .eof => "<eof>",
             .invalid => "<invalid>",
+            .newline => "<newline>",
         };
     }
 };

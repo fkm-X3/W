@@ -27,7 +27,17 @@ pub const Lexer = struct {
         while (self.pos < self.source.len) {
             const ch = self.source[self.pos];
 
-            if (std.ascii.isWhitespace(ch)) {
+            if (ch == '\n' or ch == '\r') {
+                const start = self.pos;
+                self.pos += 1;
+                if (ch == '\r' and self.pos < self.source.len and self.source[self.pos] == '\n') {
+                    self.pos += 1;
+                }
+                try self.tokens.append(self.allocator, .{ .tag = .newline, .start = start, .end = self.pos });
+                continue;
+            }
+
+            if (ch == ' ' or ch == '\t') {
                 self.pos += 1;
                 continue;
             }
@@ -163,7 +173,7 @@ pub const Lexer = struct {
             } else if (ch == quote) {
                 self.pos += 1;
                 break;
-            } else if (ch == '\n') {
+            } else if (ch == '\n' or ch == '\r') {
                 return error.UnterminatedString;
             } else {
                 self.pos += 1;
@@ -427,8 +437,9 @@ test "lexer: line comments" {
     const tokens = try lexer.tokenize();
     try std.testing.expectEqual(@as(usize, 3), tokens.len);
     try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
-    try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
-    try std.testing.expectEqualStrings("add", tokens[1].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.newline, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[2].tag);
+    try std.testing.expectEqualStrings("add", tokens[2].lexeme(lexer.source));
 }
 
 test "lexer: block comments" {
@@ -487,16 +498,17 @@ test "lexer: struct definition" {
     defer lexer.deinit();
 
     const tokens = try lexer.tokenize();
-    try std.testing.expect(tokens.len > 10);
+    try std.testing.expect(tokens.len > 12);
     try std.testing.expectEqual(TokenTag.struct_kw, tokens[0].tag);
     try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
     try std.testing.expectEqualStrings("Vec2", tokens[1].lexeme(lexer.source));
     try std.testing.expectEqual(TokenTag.lbrace, tokens[2].tag);
-    try std.testing.expectEqual(TokenTag.identifier, tokens[3].tag);
-    try std.testing.expectEqualStrings("x", tokens[3].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.colon, tokens[4].tag);
-    try std.testing.expectEqual(TokenTag.identifier, tokens[5].tag);
-    try std.testing.expectEqualStrings("f64", tokens[5].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.newline, tokens[3].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[4].tag);
+    try std.testing.expectEqualStrings("x", tokens[4].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.colon, tokens[5].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[6].tag);
+    try std.testing.expectEqualStrings("f64", tokens[6].lexeme(lexer.source));
 }
 
 test "lexer: class definition" {
@@ -646,7 +658,7 @@ test "lexer: multiple statements" {
     defer lexer.deinit();
 
     const tokens = try lexer.tokenize();
-    try std.testing.expect(tokens.len > 15);
+    try std.testing.expect(tokens.len > 17);
     try std.testing.expectEqual(TokenTag.let_kw, tokens[0].tag);
     try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
     try std.testing.expectEqualStrings("x", tokens[1].lexeme(lexer.source));
@@ -656,21 +668,23 @@ test "lexer: multiple statements" {
     try std.testing.expectEqual(TokenTag.eq, tokens[4].tag);
     try std.testing.expectEqual(TokenTag.int_literal, tokens[5].tag);
     try std.testing.expectEqualStrings("42", tokens[5].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.let_kw, tokens[6].tag);
-    try std.testing.expectEqual(TokenTag.identifier, tokens[7].tag);
-    try std.testing.expectEqualStrings("y", tokens[7].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.colon, tokens[8].tag);
-    try std.testing.expectEqual(TokenTag.identifier, tokens[9].tag);
-    try std.testing.expectEqualStrings("f64", tokens[9].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.eq, tokens[10].tag);
-    try std.testing.expectEqual(TokenTag.float_literal, tokens[11].tag);
-    try std.testing.expectEqualStrings("3.14", tokens[11].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.return_kw, tokens[12].tag);
-    try std.testing.expectEqual(TokenTag.identifier, tokens[13].tag);
-    try std.testing.expectEqualStrings("x", tokens[13].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.plus, tokens[14].tag);
+    try std.testing.expectEqual(TokenTag.newline, tokens[6].tag);
+    try std.testing.expectEqual(TokenTag.let_kw, tokens[7].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[8].tag);
+    try std.testing.expectEqualStrings("y", tokens[8].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.colon, tokens[9].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[10].tag);
+    try std.testing.expectEqualStrings("f64", tokens[10].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.eq, tokens[11].tag);
+    try std.testing.expectEqual(TokenTag.float_literal, tokens[12].tag);
+    try std.testing.expectEqualStrings("3.14", tokens[12].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.newline, tokens[13].tag);
+    try std.testing.expectEqual(TokenTag.return_kw, tokens[14].tag);
     try std.testing.expectEqual(TokenTag.identifier, tokens[15].tag);
-    try std.testing.expectEqualStrings("y", tokens[15].lexeme(lexer.source));
+    try std.testing.expectEqualStrings("x", tokens[15].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.plus, tokens[16].tag);
+    try std.testing.expectEqual(TokenTag.identifier, tokens[17].tag);
+    try std.testing.expectEqualStrings("y", tokens[17].lexeme(lexer.source));
 }
 
 test "lexer: edge case - single dot" {
@@ -702,9 +716,11 @@ test "lexer: whitespace handling" {
     defer lexer.deinit();
 
     const tokens = try lexer.tokenize();
-    try std.testing.expectEqual(@as(usize, 2), tokens.len);
-    try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
-    try std.testing.expectEqual(TokenTag.eof, tokens[1].tag);
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
+    try std.testing.expectEqual(TokenTag.newline, tokens[0].tag);
+    try std.testing.expectEqual(TokenTag.newline, tokens[1].tag);
+    try std.testing.expectEqual(TokenTag.fn_kw, tokens[2].tag);
+    try std.testing.expectEqual(TokenTag.eof, tokens[3].tag);
 }
 
 test "lexer: underscore identifiers" {
