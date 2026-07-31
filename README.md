@@ -4,4 +4,5 @@
 
 W, the lang built ontop of Tungsten
 
-(W is identified as CWeb by linguist)
+> [!IMPORTANT]
+> W is being renamed to "Wolframite" (Wolframite is the main material tungsten metal is extracted from, the tungsten compile wouldn't exist without W (of Wolframite now) keeping the connection to tungsten that W had). This update is going to be rolled out tommorow (The change was maily to avoid conflicts with Cweb).
