@@ -167,6 +167,9 @@ pub const TypeChecker = struct {
         }
         return self.void_ty;
     }
+    pub fn nodeType(self: *const TypeChecker, node: NodeIdx) TypeIdx {
+        return self.getNodeType(node);
+    }
 
     fn checkDecl(self: *TypeChecker, decl_idx: NodeIdx) anyerror!void {
         const decl = self.arena.get(decl_idx);
