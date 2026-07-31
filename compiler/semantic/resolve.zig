@@ -18,6 +18,16 @@ const SymbolKind = scope_mod.SymbolKind;
 const TypePool = types_mod.TypePool;
 const TypeIdx = types_mod.TypeIdx;
 
+pub fn isBuiltinTypeName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "i8") or std.mem.eql(u8, name, "i16") or
+        std.mem.eql(u8, name, "i32") or std.mem.eql(u8, name, "i64") or
+        std.mem.eql(u8, name, "u8") or std.mem.eql(u8, name, "u16") or
+        std.mem.eql(u8, name, "u32") or std.mem.eql(u8, name, "u64") or
+        std.mem.eql(u8, name, "f32") or std.mem.eql(u8, name, "f64") or
+        std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "String") or
+        std.mem.eql(u8, name, "void") or std.mem.eql(u8, name, "Self");
+}
+
 pub const Resolver = struct {
     allocator: Allocator,
     arena: *AstArena,
@@ -208,7 +218,7 @@ pub const Resolver = struct {
         });
     }
 
-    fn resolveDecl(self: *Resolver, decl_idx: NodeIdx) !void {
+    fn resolveDecl(self: *Resolver, decl_idx: NodeIdx) anyerror!void {
         const decl = self.arena.get(decl_idx);
         switch (decl.*) {
             .fn_decl => |f| {
@@ -222,7 +232,7 @@ pub const Resolver = struct {
             },
             .class_decl => |c| {
                 if (c.parent) |parent| {
-                    _ = self.resolveExpr(parent);
+                    try self.resolveExpr(parent);
                 }
                 for (c.methods.indices) |method_idx| {
                     try self.resolveDecl(method_idx);
@@ -231,7 +241,7 @@ pub const Resolver = struct {
             .enum_decl => {},
             .interface_decl => {},
             .impl_block => |ib| {
-                _ = self.resolveExpr(ib.self_type);
+                try self.resolveExpr(ib.self_type);
                 const impl_scope = try self.scopes.pushScope(self.scopes.currentScope());
                 for (ib.methods.indices) |method_idx| {
                     try self.collectFnInScope(method_idx, impl_scope);
@@ -245,7 +255,7 @@ pub const Resolver = struct {
         }
     }
 
-    fn resolveFnDecl(self: *Resolver, fn_idx: NodeIdx) !void {
+    fn resolveFnDecl(self: *Resolver, fn_idx: NodeIdx) anyerror!void {
         const fn_decl = self.arena.get(fn_idx);
         const f = fn_decl.fn_decl;
         _ = try self.scopes.pushScope(self.scopes.currentScope());
@@ -267,7 +277,7 @@ pub const Resolver = struct {
             if (self.scopes.lookupCurrent(param_name) != null) {
                 self.errorAt(param_idx, "duplicate parameter '{s}'", .{param_name});
             }
-            _ = self.resolveExpr(param.param.ty);
+            try self.resolveExpr(param.param.ty);
             try self.scopes.insert(param_name, .{
                 .name = param.param.name,
                 .kind = .param,
@@ -277,17 +287,17 @@ pub const Resolver = struct {
         }
 
         if (f.return_type) |ret_ty| {
-            _ = self.resolveExpr(ret_ty);
+            try self.resolveExpr(ret_ty);
         }
 
         if (f.body != NodeIdx.none) {
-            _ = self.resolveStmt(f.body);
+            try self.resolveStmt(f.body);
         }
 
         self.scopes.popScope();
     }
 
-    fn resolveStmt(self: *Resolver, stmt_idx: NodeIdx) !void {
+    fn resolveStmt(self: *Resolver, stmt_idx: NodeIdx) anyerror!void {
         const stmt = self.arena.get(stmt_idx);
         switch (stmt.*) {
             .block => |b| {
@@ -299,10 +309,10 @@ pub const Resolver = struct {
             },
             .let_stmt => |l| {
                 if (l.ty) |ty| {
-                    _ = self.resolveExpr(ty);
+                    try self.resolveExpr(ty);
                 }
                 if (l.init_expr) |init_val| {
-                    _ = self.resolveExpr(init_val);
+                    try self.resolveExpr(init_val);
                 }
                 try self.scopes.insert(self.nameSlice(l.name), .{
                     .name = l.name,
@@ -313,29 +323,29 @@ pub const Resolver = struct {
             },
             .return_stmt => |r| {
                 if (r.value) |val| {
-                    _ = self.resolveExpr(val);
+                    try self.resolveExpr(val);
                 }
             },
             .expr_stmt => |e| {
-                _ = self.resolveExpr(e.expr);
+                try self.resolveExpr(e.expr);
             },
             .defer_stmt => |d| {
-                _ = self.resolveExpr(d.expr);
+                try self.resolveExpr(d.expr);
             },
             .if_expr => |i| {
-                _ = self.resolveExpr(i.cond);
+                try self.resolveExpr(i.cond);
                 try self.resolveStmt(i.then_body);
                 if (i.else_body) |else_b| {
                     try self.resolveStmt(else_b);
                 }
             },
             .while_expr => |w| {
-                _ = self.resolveExpr(w.cond);
+                try self.resolveExpr(w.cond);
                 try self.resolveStmt(w.body);
             },
             .for_range => |fr| {
-                _ = self.resolveExpr(fr.start);
-                _ = self.resolveExpr(fr.end);
+                try self.resolveExpr(fr.start);
+                try self.resolveExpr(fr.end);
                 _ = try self.scopes.pushScope(self.scopes.currentScope());
                 try self.scopes.insert(self.nameSlice(fr.var_name), .{
                     .name = fr.var_name,
@@ -347,7 +357,7 @@ pub const Resolver = struct {
                 self.scopes.popScope();
             },
             .for_each => |fe| {
-                _ = self.resolveExpr(fe.iterable);
+                try self.resolveExpr(fe.iterable);
                 _ = try self.scopes.pushScope(self.scopes.currentScope());
                 try self.scopes.insert(self.nameSlice(fe.var_name), .{
                     .name = fe.var_name,
@@ -359,65 +369,66 @@ pub const Resolver = struct {
                 self.scopes.popScope();
             },
             .match_expr => |m| {
-                _ = self.resolveExpr(m.scrutinee);
+                try self.resolveExpr(m.scrutinee);
                 for (m.arms.indices) |arm_idx| {
                     const arm = self.arena.get(arm_idx);
-                    _ = self.resolveExpr(arm.match_arm.pattern);
-                    _ = self.resolveExpr(arm.match_arm.body);
+                    try self.resolveExpr(arm.match_arm.pattern);
+                    try self.resolveExpr(arm.match_arm.body);
                 }
             },
             .fn_decl => {
                 try self.resolveFnDecl(stmt_idx);
             },
             else => {
-                _ = self.resolveExpr(stmt_idx);
+                try self.resolveExpr(stmt_idx);
             },
         }
     }
 
-    fn resolveExpr(self: *Resolver, expr_idx: NodeIdx) !void {
+    fn resolveExpr(self: *Resolver, expr_idx: NodeIdx) anyerror!void {
         const expr = self.arena.get(expr_idx);
         switch (expr.*) {
             .identifier => |id| {
                 const name = self.nameSlice(id);
+                if (isBuiltinTypeName(name)) return;
                 if (self.scopes.lookup(name, self.scopes.currentScope())) |_| {
                 } else {
                     self.errorAt(expr_idx, "undefined identifier '{s}'", .{name});
                 }
             },
             .binary_op => |b| {
-                _ = self.resolveExpr(b.left);
-                _ = self.resolveExpr(b.right);
+                try self.resolveExpr(b.left);
+                try self.resolveExpr(b.right);
             },
             .unary_op => |u| {
-                _ = self.resolveExpr(u.operand);
+                try self.resolveExpr(u.operand);
             },
             .call => |c| {
-                _ = self.resolveExpr(c.func);
+                try self.resolveExpr(c.func);
                 for (c.args.indices) |arg| {
-                    _ = self.resolveExpr(arg);
+                    try self.resolveExpr(arg);
                 }
             },
             .field_access => |fa| {
-                _ = self.resolveExpr(fa.object);
+                try self.resolveExpr(fa.object);
             },
             .index_access => |ia| {
-                _ = self.resolveExpr(ia.object);
-                _ = self.resolveExpr(ia.index);
+                try self.resolveExpr(ia.object);
+                try self.resolveExpr(ia.index);
             },
             .paren_expr => |p| {
-                _ = self.resolveExpr(p);
+                try self.resolveExpr(p);
             },
             .struct_init => |si| {
-                _ = self.resolveExpr(si.ty);
+                try self.resolveExpr(si.ty);
                 for (si.fields.indices) |field_idx| {
                     const field = self.arena.get(field_idx);
-                    _ = self.resolveExpr(field.struct_init_field.value);
+                    try self.resolveExpr(field.struct_init_field.value);
                 }
             },
             .range_expr => |r| {
-                _ = self.resolveExpr(r.start);
-                _ = self.resolveExpr(r.end);
+                try self.resolveExpr(r.start);
+                try self.resolveExpr(r.end);
             },
             .int_literal, .float_literal, .string_literal, .char_literal, .bool_literal, .null_literal => {},
             .block => |b| {
@@ -428,18 +439,18 @@ pub const Resolver = struct {
                 self.scopes.popScope();
             },
             .if_expr => |i| {
-                _ = self.resolveExpr(i.cond);
+                try self.resolveExpr(i.cond);
                 try self.resolveStmt(i.then_body);
                 if (i.else_body) |else_b| {
                     try self.resolveStmt(else_b);
                 }
             },
             .match_expr => |m| {
-                _ = self.resolveExpr(m.scrutinee);
+                try self.resolveExpr(m.scrutinee);
                 for (m.arms.indices) |arm_idx| {
                     const arm = self.arena.get(arm_idx);
-                    _ = self.resolveExpr(arm.match_arm.pattern);
-                    _ = self.resolveExpr(arm.match_arm.body);
+                    try self.resolveExpr(arm.match_arm.pattern);
+                    try self.resolveExpr(arm.match_arm.body);
                 }
             },
             .param, .field, .enum_variant, .match_arm, .struct_init_field => {},
@@ -452,8 +463,10 @@ pub const Resolver = struct {
 fn runResolve(allocator: Allocator, source: []const u8) !struct { arena: AstArena, type_pool: TypePool, diagnostics: diag.Diagnostics } {
     var arena = AstArena.init(allocator);
     var lex = @import("../lexer/lexer.zig").Lexer.init(allocator, source);
+    defer lex.deinit();
     const tokens = try lex.tokenize();
     var diags = diag.Diagnostics.init(allocator);
+    diags.owns_messages = true;
     var parser = @import("../parser/parser.zig").Parser.init(allocator, tokens, source, &arena, &diags);
     const module_node = parser.parseModule();
     var type_pool = TypePool.init(allocator);
@@ -506,6 +519,9 @@ test "resolve: struct declaration" {
 
 test "resolve: class declaration" {
     var res = try runResolve(std.testing.allocator,
+        \\class Animal {
+        \\    name: String
+        \\}
         \\class Dog(Animal) {
         \\    breed: String
         \\    fn speak(self: *Dog) -> String {
@@ -669,6 +685,10 @@ test "resolve: match expression" {
 
 test "resolve: field access" {
     var res = try runResolve(std.testing.allocator,
+        \\struct Vec2 {
+        \\    x: f64
+        \\    y: f64
+        \\}
         \\fn main() {
         \\    let v: Vec2 = Vec2{ .x = 1.0, .y = 2.0 }
         \\    let a := v.x

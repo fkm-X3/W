@@ -33,9 +33,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const tungsten_mod = b.addModule("Tungsten", .{
+        .root_source_file = b.path("libs/backend/src/root.zig"),
+        .target = target,
+    });
+
     const compiler_mod = b.addModule("compiler", .{
         .root_source_file = b.path("compiler/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "Tungsten", .module = tungsten_mod },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -134,6 +142,12 @@ pub fn build(b: *std.Build) void {
     });
     const run_compiler_tests = b.addRunArtifact(compiler_tests);
 
+    // Backend (Tungsten) module tests
+    const backend_tests = b.addTest(.{
+        .root_module = tungsten_mod,
+    });
+    const run_backend_tests = b.addRunArtifact(backend_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -141,6 +155,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_compiler_tests.step);
+    test_step.dependOn(&run_backend_tests.step);
 
     const test_compiler_step = b.step("test-compiler", "Run compiler tests");
     test_compiler_step.dependOn(&run_compiler_tests.step);

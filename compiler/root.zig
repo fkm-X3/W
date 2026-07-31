@@ -7,3 +7,15 @@ pub const types = @import("semantic/types.zig");
 pub const scope = @import("semantic/scope.zig");
 pub const resolve = @import("semantic/resolve.zig");
 pub const typecheck = @import("semantic/typecheck.zig");
+
+test {
+    _ = @import("diagnostics.zig");
+    _ = @import("lexer/lexer.zig");
+    _ = @import("lexer/token.zig");
+    _ = @import("parser/ast.zig");
+    _ = @import("parser/parser.zig");
+    _ = @import("semantic/types.zig");
+    _ = @import("semantic/scope.zig");
+    _ = @import("semantic/resolve.zig");
+    _ = @import("semantic/typecheck.zig");
+}

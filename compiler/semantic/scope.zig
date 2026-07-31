@@ -59,13 +59,13 @@ pub const ScopeStack = struct {
     }
 
     pub fn popScope(self: *ScopeStack) void {
-        var scope = &self.scopes.getLast();
+        var scope = &self.scopes.items[self.scopes.items.len - 1];
         scope.symbols.deinit(self.allocator);
         _ = self.scopes.pop();
     }
 
     pub fn insert(self: *ScopeStack, name: []const u8, symbol: Symbol) !void {
-        const scope = &self.scopes.getLast();
+        const scope = &self.scopes.items[self.scopes.items.len - 1];
         try scope.symbols.put(self.allocator, name, symbol);
     }
 

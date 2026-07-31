@@ -204,7 +204,7 @@ pub const KEYWORDS = init: {
     };
 
     const Map = std.StaticStringMap(TokenTag);
-    break :init Map.init(pairs);
+    break :init Map.initComptime(pairs);
 };
 
 pub fn lookupKeyword(ident: []const u8) ?TokenTag {

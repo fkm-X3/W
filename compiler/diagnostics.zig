@@ -29,6 +29,7 @@ pub const Diagnostic = struct {
 pub const Diagnostics = struct {
     allocator: std.mem.Allocator,
     items: std.ArrayListUnmanaged(Diagnostic),
+    owns_messages: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Diagnostics {
         return .{
@@ -38,6 +39,11 @@ pub const Diagnostics = struct {
     }
 
     pub fn deinit(self: *Diagnostics) void {
+        if (self.owns_messages) {
+            for (self.items.items) |item| {
+                self.allocator.free(item.message);
+            }
+        }
         self.items.deinit(self.allocator);
     }
 

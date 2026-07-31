@@ -25,14 +25,25 @@ pub const TypeChecker = struct {
     module_node: NodeIdx,
 
     node_types: std.ArrayListUnmanaged(TypeIdx),
-    scope_stack: *const scope_mod.ScopeStack,
+    scopes: scope_mod.ScopeStack,
 
     fn_ret_type: TypeIdx,
     in_function: bool,
 
+    type_name_buf: [2][16]u8,
+    type_name_toggle: u1 = 0,
+
     void_ty: TypeIdx,
     bool_ty: TypeIdx,
+    i8_ty: TypeIdx,
+    i16_ty: TypeIdx,
     i32_ty: TypeIdx,
+    i64_ty: TypeIdx,
+    u8_ty: TypeIdx,
+    u16_ty: TypeIdx,
+    u32_ty: TypeIdx,
+    u64_ty: TypeIdx,
+    f32_ty: TypeIdx,
     f64_ty: TypeIdx,
     string_ty: TypeIdx,
 
@@ -42,17 +53,35 @@ pub const TypeChecker = struct {
         source: []const u8,
         type_pool: *TypePool,
         diagnostics: *diag.Diagnostics,
-        scope_stack: *const scope_mod.ScopeStack,
+        resolver_scopes: *const scope_mod.ScopeStack,
         module_node: NodeIdx,
     ) TypeChecker {
         const void_ty = type_pool.add(.void) catch @panic("OOM");
         const bool_ty = type_pool.add(.bool_type) catch @panic("OOM");
+        const i8_ty = type_pool.add(.{ .int = .{ .signed = true, .bits = 8 } }) catch @panic("OOM");
+        const i16_ty = type_pool.add(.{ .int = .{ .signed = true, .bits = 16 } }) catch @panic("OOM");
         const i32_ty = type_pool.add(.{ .int = .{ .signed = true, .bits = 32 } }) catch @panic("OOM");
+        const i64_ty = type_pool.add(.{ .int = .{ .signed = true, .bits = 64 } }) catch @panic("OOM");
+        const u8_ty = type_pool.add(.{ .int = .{ .signed = false, .bits = 8 } }) catch @panic("OOM");
+        const u16_ty = type_pool.add(.{ .int = .{ .signed = false, .bits = 16 } }) catch @panic("OOM");
+        const u32_ty = type_pool.add(.{ .int = .{ .signed = false, .bits = 32 } }) catch @panic("OOM");
+        const u64_ty = type_pool.add(.{ .int = .{ .signed = false, .bits = 64 } }) catch @panic("OOM");
+        const f32_ty = type_pool.add(.{ .float = .f32 }) catch @panic("OOM");
         const f64_ty = type_pool.add(.{ .float = .f64 }) catch @panic("OOM");
         const string_ty = type_pool.add(.string_type) catch @panic("OOM");
 
         var node_types: std.ArrayListUnmanaged(TypeIdx) = .empty;
         node_types.append(allocator, void_ty) catch @panic("OOM");
+
+        var scopes = scope_mod.ScopeStack.init(allocator);
+        const module_scope = scopes.pushScope(null) catch @panic("OOM");
+        if (resolver_scopes.scopeCount() > 0) {
+            var it = resolver_scopes.scopes.items[0].symbols.iterator();
+            while (it.next()) |entry| {
+                scopes.insert(entry.key_ptr.*, entry.value_ptr.*) catch @panic("OOM");
+            }
+        }
+        _ = module_scope;
 
         return .{
             .allocator = allocator,
@@ -60,21 +89,49 @@ pub const TypeChecker = struct {
             .source = source,
             .type_pool = type_pool,
             .diagnostics = diagnostics,
-            .scope_stack = scope_stack,
+            .scopes = scopes,
             .module_node = module_node,
             .node_types = node_types,
             .fn_ret_type = void_ty,
             .in_function = false,
+            .type_name_buf = undefined,
+            .type_name_toggle = 0,
             .void_ty = void_ty,
             .bool_ty = bool_ty,
+            .i8_ty = i8_ty,
+            .i16_ty = i16_ty,
             .i32_ty = i32_ty,
+            .i64_ty = i64_ty,
+            .u8_ty = u8_ty,
+            .u16_ty = u16_ty,
+            .u32_ty = u32_ty,
+            .u64_ty = u64_ty,
+            .f32_ty = f32_ty,
             .f64_ty = f64_ty,
             .string_ty = string_ty,
         };
     }
 
+    fn builtinTypeName(self: *const TypeChecker, name: []const u8) ?TypeIdx {
+        if (std.mem.eql(u8, name, "void")) return self.void_ty;
+        if (std.mem.eql(u8, name, "bool")) return self.bool_ty;
+        if (std.mem.eql(u8, name, "i8")) return self.i8_ty;
+        if (std.mem.eql(u8, name, "i16")) return self.i16_ty;
+        if (std.mem.eql(u8, name, "i32")) return self.i32_ty;
+        if (std.mem.eql(u8, name, "i64")) return self.i64_ty;
+        if (std.mem.eql(u8, name, "u8")) return self.u8_ty;
+        if (std.mem.eql(u8, name, "u16")) return self.u16_ty;
+        if (std.mem.eql(u8, name, "u32")) return self.u32_ty;
+        if (std.mem.eql(u8, name, "u64")) return self.u64_ty;
+        if (std.mem.eql(u8, name, "f32")) return self.f32_ty;
+        if (std.mem.eql(u8, name, "f64")) return self.f64_ty;
+        if (std.mem.eql(u8, name, "String")) return self.string_ty;
+        return null;
+    }
+
     pub fn deinit(self: *TypeChecker) void {
         self.node_types.deinit(self.allocator);
+        self.scopes.deinit();
     }
 
     pub fn check(self: *TypeChecker) !void {
@@ -111,7 +168,7 @@ pub const TypeChecker = struct {
         return self.void_ty;
     }
 
-    fn checkDecl(self: *TypeChecker, decl_idx: NodeIdx) !void {
+    fn checkDecl(self: *TypeChecker, decl_idx: NodeIdx) anyerror!void {
         const decl = self.arena.get(decl_idx);
         switch (decl.*) {
             .fn_decl => try self.checkFnDecl(decl_idx),
@@ -129,7 +186,7 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn checkStructDecl(self: *TypeChecker, decl_idx: NodeIdx) !void {
+    fn checkStructDecl(self: *TypeChecker, decl_idx: NodeIdx) anyerror!void {
         const decl = self.arena.get(decl_idx);
         const s = decl.struct_decl;
         for (s.methods.indices) |method_idx| {
@@ -137,7 +194,7 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn checkClassDecl(self: *TypeChecker, decl_idx: NodeIdx) !void {
+    fn checkClassDecl(self: *TypeChecker, decl_idx: NodeIdx) anyerror!void {
         const decl = self.arena.get(decl_idx);
         const c = decl.class_decl;
         for (c.methods.indices) |method_idx| {
@@ -149,7 +206,7 @@ pub const TypeChecker = struct {
 
     fn checkInterfaceDecl(_: *TypeChecker, _: NodeIdx) !void {}
 
-    fn checkFnDecl(self: *TypeChecker, fn_idx: NodeIdx) !void {
+    fn checkFnDecl(self: *TypeChecker, fn_idx: NodeIdx) anyerror!void {
         const fn_decl = self.arena.get(fn_idx);
         const f = fn_decl.fn_decl;
 
@@ -165,21 +222,48 @@ pub const TypeChecker = struct {
 
         self.setNodeType(fn_idx, self.fn_ret_type);
 
+        const fn_scope = self.scopes.pushScope(self.scopes.currentScope()) catch @panic("OOM");
+
+        for (f.generic_params.indices) |gp_idx| {
+            const gp = self.arena.get(gp_idx);
+            self.scopes.insert(self.nameSlice(gp.identifier), .{
+                .name = gp.identifier,
+                .kind = .generic_param,
+                .decl_node = gp_idx,
+                .type_idx = TypeIdx.none,
+            }) catch @panic("OOM");
+        }
+
+        for (f.params.indices) |param_idx| {
+            const param = self.arena.get(param_idx);
+            self.scopes.insert(self.nameSlice(param.param.name), .{
+                .name = param.param.name,
+                .kind = .param,
+                .decl_node = param_idx,
+                .type_idx = self.inferTypeRef(param.param.ty),
+            }) catch @panic("OOM");
+        }
+
         if (f.body != NodeIdx.none) {
             try self.checkStmt(f.body);
         }
+
+        self.scopes.popScope();
+        _ = fn_scope;
 
         self.fn_ret_type = prev_ret;
         self.in_function = prev_in_fn;
     }
 
-    fn checkStmt(self: *TypeChecker, stmt_idx: NodeIdx) !void {
+    fn checkStmt(self: *TypeChecker, stmt_idx: NodeIdx) anyerror!void {
         const stmt = self.arena.get(stmt_idx);
         switch (stmt.*) {
             .block => |b| {
+                _ = self.scopes.pushScope(self.scopes.currentScope()) catch @panic("OOM");
                 for (b.stmts.indices) |inner| {
                     try self.checkStmt(inner);
                 }
+                self.scopes.popScope();
             },
             .let_stmt => |l| {
                 var declared_ty: TypeIdx = self.void_ty;
@@ -199,6 +283,13 @@ pub const TypeChecker = struct {
                     }
                     self.setNodeType(stmt_idx, init_ty);
                 }
+
+                self.scopes.insert(self.nameSlice(l.name), .{
+                    .name = l.name,
+                    .kind = .local,
+                    .decl_node = stmt_idx,
+                    .type_idx = self.getNodeType(stmt_idx),
+                }) catch @panic("OOM");
             },
             .return_stmt => |r| {
                 if (r.value) |val| {
@@ -241,12 +332,28 @@ pub const TypeChecker = struct {
             .for_range => |fr| {
                 _ = self.inferExprType(fr.start);
                 _ = self.inferExprType(fr.end);
+                _ = self.scopes.pushScope(self.scopes.currentScope()) catch @panic("OOM");
+                self.scopes.insert(self.nameSlice(fr.var_name), .{
+                    .name = fr.var_name,
+                    .kind = .local,
+                    .decl_node = stmt_idx,
+                    .type_idx = self.i32_ty,
+                }) catch @panic("OOM");
                 try self.checkStmt(fr.body);
+                self.scopes.popScope();
                 self.setNodeType(stmt_idx, self.void_ty);
             },
             .for_each => |fe| {
                 _ = self.inferExprType(fe.iterable);
+                _ = self.scopes.pushScope(self.scopes.currentScope()) catch @panic("OOM");
+                self.scopes.insert(self.nameSlice(fe.var_name), .{
+                    .name = fe.var_name,
+                    .kind = .local,
+                    .decl_node = stmt_idx,
+                    .type_idx = TypeIdx.none,
+                }) catch @panic("OOM");
                 try self.checkStmt(fe.body);
+                self.scopes.popScope();
                 self.setNodeType(stmt_idx, self.void_ty);
             },
             .match_expr => |m| {
@@ -287,7 +394,8 @@ pub const TypeChecker = struct {
             .null_literal => return self.void_ty,
             .identifier => |id| {
                 const name = self.nameSlice(id);
-                if (self.scope_stack.lookup(name, self.scope_stack.currentScope())) |sym| {
+                if (self.builtinTypeName(name)) |ty| return ty;
+                if (self.scopes.lookup(name, self.scopes.currentScope())) |sym| {
                     if (sym.type_idx != TypeIdx.none) {
                         return sym.type_idx;
                     }
@@ -350,40 +458,41 @@ pub const TypeChecker = struct {
                 const obj_sem_type = self.type_pool.get(obj_ty);
                 switch (obj_sem_type) {
                     .struct_type => |decl_node| {
-                        const decl = self.arena.get(decl_node);
-                        const s = decl.struct_decl;
-                        const field_name = self.nameSlice(fa.field);
-                        for (s.fields.indices) |field_idx| {
-                            const field = self.arena.get(field_idx);
-                            if (std.mem.eql(u8, self.nameSlice(field.field.name), field_name)) {
-                                return self.inferTypeRefNode(field.field.ty);
-                            }
+                        if (self.structFieldType(decl_node, self.nameSlice(fa.field))) |ft| {
+                            return ft;
                         }
+                        const s = self.arena.get(decl_node).struct_decl;
                         self.errorAt(expr_idx, "struct '{s}' has no field '{s}'", .{
-                            self.nameSlice(s.name), field_name,
+                            self.nameSlice(s.name), self.nameSlice(fa.field),
                         });
                         return self.void_ty;
                     },
                     .class_type => |decl_node| {
-                        const decl = self.arena.get(decl_node);
-                        const c = decl.class_decl;
-                        const field_name = self.nameSlice(fa.field);
-                        for (c.fields.indices) |field_idx| {
-                            const field = self.arena.get(field_idx);
-                            if (std.mem.eql(u8, self.nameSlice(field.field.name), field_name)) {
-                                return self.inferTypeRefNode(field.field.ty);
-                            }
+                        if (self.classFieldType(decl_node, self.nameSlice(fa.field))) |ft| {
+                            return ft;
                         }
+                        const c = self.arena.get(decl_node).class_decl;
                         self.errorAt(expr_idx, "class '{s}' has no field '{s}'", .{
-                            self.nameSlice(c.name), field_name,
+                            self.nameSlice(c.name), self.nameSlice(fa.field),
                         });
                         return self.void_ty;
                     },
                     .pointer => |elem| {
                         const elem_type = self.type_pool.get(elem);
                         switch (elem_type) {
-                            .struct_type, .class_type => {
-                                return self.inferExprType(expr_idx);
+                            .struct_type => |decl_node| {
+                                if (self.structFieldType(decl_node, self.nameSlice(fa.field))) |ft| {
+                                    return ft;
+                                }
+                                self.errorAt(expr_idx, "struct has no field '{s}'", .{self.nameSlice(fa.field)});
+                                return self.void_ty;
+                            },
+                            .class_type => |decl_node| {
+                                if (self.classFieldType(decl_node, self.nameSlice(fa.field))) |ft| {
+                                    return ft;
+                                }
+                                self.errorAt(expr_idx, "class has no field '{s}'", .{self.nameSlice(fa.field)});
+                                return self.void_ty;
                             },
                             else => {},
                         }
@@ -413,12 +522,11 @@ pub const TypeChecker = struct {
                 return self.i32_ty;
             },
             .block => |b| {
-                var last_ty = self.void_ty;
-                for (b.stmts.indices) |inner| {
-                    tryStd(self.checkStmt(inner));
-                    last_ty = self.getNodeType(inner);
+                tryStd(self.checkStmt(expr_idx));
+                if (b.stmts.indices.len > 0) {
+                    return self.getNodeType(b.stmts.indices[b.stmts.indices.len - 1]);
                 }
-                return last_ty;
+                return self.void_ty;
             },
             .if_expr => |i| {
                 const cond_ty = self.inferExprType(i.cond);
@@ -455,8 +563,37 @@ pub const TypeChecker = struct {
         return self.inferExprType(expr_idx);
     }
 
-    fn inferTypeRefNode(self: *TypeChecker, _: anytype) TypeIdx {
-        return self.i32_ty;
+    fn structFieldType(self: *TypeChecker, decl_node: NodeIdx, field_name: []const u8) ?TypeIdx {
+        const s = self.arena.get(decl_node).struct_decl;
+        for (s.fields.indices) |field_idx| {
+            const field = self.arena.get(field_idx);
+            if (std.mem.eql(u8, self.nameSlice(field.field.name), field_name)) {
+                return self.inferTypeRefNode(field.field.ty);
+            }
+        }
+        return null;
+    }
+
+    fn classFieldType(self: *TypeChecker, decl_node: NodeIdx, field_name: []const u8) ?TypeIdx {
+        const c = self.arena.get(decl_node).class_decl;
+        for (c.fields.indices) |field_idx| {
+            const field = self.arena.get(field_idx);
+            if (std.mem.eql(u8, self.nameSlice(field.field.name), field_name)) {
+                return self.inferTypeRefNode(field.field.ty);
+            }
+        }
+        return null;
+    }
+
+    fn inferTypeRefNode(self: *TypeChecker, ty: ast.TypeRepr) TypeIdx {
+        return switch (ty) {
+            .plain => |n| self.inferExprType(n),
+            .pointer => |n| blk: {
+                const pointee = self.inferExprType(n);
+                break :blk self.type_pool.add(.{ .pointer = pointee }) catch @panic("OOM");
+            },
+            .generic_app => |g| self.inferExprType(g.base),
+        };
     }
 
     fn resolveDeclType(self: *TypeChecker, decl_node: NodeIdx) TypeIdx {
@@ -484,7 +621,7 @@ pub const TypeChecker = struct {
                 return self.inferTypeRefNode(decl.field.ty);
             },
             .param => {
-                return self.inferTypeRefNode(decl.param.ty);
+                return self.inferTypeRef(decl.param.ty);
             },
             .let_stmt => {
                 if (decl.let_stmt.ty) |ty| {
@@ -535,15 +672,16 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn typeName(self: *const TypeChecker, idx: TypeIdx) []const u8 {
+    fn typeName(self: *TypeChecker, idx: TypeIdx) []const u8 {
         const t = self.type_pool.get(idx);
         return switch (t) {
+            .int => |i| blk: {
+                const buf = &self.type_name_buf[self.type_name_toggle];
+                self.type_name_toggle ^= 1;
+                break :blk std.fmt.bufPrint(buf, "{s}{d}", .{ if (i.signed) "i" else "u", i.bits }) catch "int";
+            },
             .void => "void",
             .bool_type => "bool",
-            .int => |i| if (i.signed)
-                std.fmt.allocPrint(self.allocator, "i{d}", .{i.bits}) catch @panic("OOM")
-            else
-                std.fmt.allocPrint(self.allocator, "u{d}", .{i.bits}) catch @panic("OOM"),
             .float => |f| @tagName(f),
             .pointer => "pointer",
             .function => "function",
@@ -571,8 +709,10 @@ fn tryStd(what: anyerror!void) void {
 fn runCheck(allocator: Allocator, source: []const u8) !struct { arena: AstArena, type_pool: TypePool, diagnostics: diag.Diagnostics } {
     var arena = AstArena.init(allocator);
     var lex = @import("../lexer/lexer.zig").Lexer.init(allocator, source);
+    defer lex.deinit();
     const tokens = try lex.tokenize();
     var diags = diag.Diagnostics.init(allocator);
+    diags.owns_messages = true;
     var parser = @import("../parser/parser.zig").Parser.init(allocator, tokens, source, &arena, &diags);
     const module_node = parser.parseModule();
     var type_pool = types_mod.TypePool.init(allocator);
@@ -580,9 +720,7 @@ fn runCheck(allocator: Allocator, source: []const u8) !struct { arena: AstArena,
         var resolver = @import("resolve.zig").Resolver.init(allocator, &arena, source, &type_pool, &diags, module_node);
         defer resolver.deinit();
         try resolver.resolve();
-    }
-    {
-        var checker = TypeChecker.init(allocator, &arena, source, &type_pool, &diags, &.{ .scopes = .empty, .allocator = undefined }, module_node);
+        var checker = TypeChecker.init(allocator, &arena, source, &type_pool, &diags, &resolver.scopes, module_node);
         defer checker.deinit();
         try checker.check();
     }
@@ -761,7 +899,7 @@ test "typecheck: let with type annotation" {
 test "typecheck: let with inferred type" {
     var res = try runCheck(std.testing.allocator,
         \\fn main() -> i32 {
-        \\    z := 42
+        \\    let z := 42
         \\    return z
         \\}
     );

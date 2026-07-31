@@ -9,6 +9,7 @@ const Token = token_mod.Token;
 const NodeIdx = ast.NodeIdx;
 const NodeList = ast.NodeList;
 const Node = ast.Node;
+const TypeRepr = ast.TypeRepr;
 const StringRef = ast.StringRef;
 const BinaryOp = ast.BinaryOp;
 const UnaryOp = ast.UnaryOp;
@@ -131,38 +132,38 @@ pub const Parser = struct {
 
     fn parseGenericParams(self: *Parser) ?NodeList {
         if (!self.check(.lbracket)) return NodeList{ .indices = &.{} };
-        self.advance();
-        var params = std.ArrayList(NodeIdx).init(self.allocator);
-        defer params.deinit();
+        _ = self.advance();
+        var params = std.ArrayList(NodeIdx).empty;
+        defer params.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
             if (self.check(.rbracket)) break;
-            if (!params.items.len == 0) {
-                if (!self.expect(.comma)) break;
+            if (params.items.len != 0) {
+                if (self.expect(.comma) == null) break;
                 self.skipNewlinesAndSemicolons();
             }
             const tok = self.expect(.identifier) orelse {
-                while (!self.check(.rbracket) and !self.check(.eof)) self.advance();
+                while (!self.check(.rbracket) and !self.check(.eof)) _ = self.advance();
                 break;
             };
-            params.append(self.appendNode(.{ .identifier = self.makeStringRef(tok) })) catch unreachable;
+            params.append(self.allocator, self.appendNode(.{ .identifier = self.makeStringRef(tok) })) catch unreachable;
             self.skipNewlinesAndSemicolons();
         }
-        self.expect(.rbracket) orelse {};
+        _ = self.expect(.rbracket);
         return self.arena.allocNodeList(params.items) catch null orelse NodeList{ .indices = &.{} };
     }
 
     fn parseParamList(self: *Parser) ?NodeList {
-        if (!self.expect(.lparen)) return NodeList{ .indices = &.{} };
-        var params = std.ArrayList(NodeIdx).init(self.allocator);
-        defer params.deinit();
+        if (self.expect(.lparen) == null) return NodeList{ .indices = &.{} };
+        var params = std.ArrayList(NodeIdx).empty;
+        defer params.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
             if (self.check(.rparen)) break;
             if (params.items.len > 0) {
-                if (!self.expect(.comma)) break;
+                if (self.expect(.comma) == null) break;
                 self.skipNewlinesAndSemicolons();
                 if (self.check(.rparen)) break;
             }
@@ -170,27 +171,27 @@ pub const Parser = struct {
                 self.recoverTo(.rparen);
                 break;
             };
-            self.expect(.colon) orelse {};
+            _ = self.expect(.colon);
             const ty = self.parseExpr(Precedence.none.toInt()) orelse NodeIdx.none;
-            params.append(self.appendNode(.{ .param = .{ .name = self.makeStringRef(name_tok), .ty = ty } })) catch unreachable;
+            params.append(self.allocator, self.appendNode(.{ .param = .{ .name = self.makeStringRef(name_tok), .ty = ty } })) catch unreachable;
             self.skipNewlinesAndSemicolons();
         }
-        self.expect(.rparen) orelse {};
+        _ = self.expect(.rparen);
         return self.arena.allocNodeList(params.items) catch null orelse NodeList{ .indices = &.{} };
     }
 
     pub fn parseModule(self: *Parser) NodeIdx {
-        var decls = std.ArrayList(NodeIdx).init(self.allocator);
-        defer decls.deinit();
+        var decls = std.ArrayList(NodeIdx).empty;
+        defer decls.deinit(self.allocator);
 
         while (!self.check(.eof)) {
             self.skipNewlinesAndSemicolons();
             if (self.check(.eof)) break;
 
             if (self.parseDecl()) |decl| {
-                decls.append(decl) catch unreachable;
+                decls.append(self.allocator, decl) catch unreachable;
             } else {
-                self.advance();
+                _ = self.advance();
             }
             self.skipNewlinesAndSemicolons();
         }
@@ -203,44 +204,44 @@ pub const Parser = struct {
         const tok = self.peek();
         switch (tok.tag) {
             .fn_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseFnDecl(false);
             },
             .override_kw => {
-                self.advance();
+                _ = self.advance();
                 if (!self.check(.fn_kw)) {
                     self.errorHere("expected 'fn' after 'override'", .{});
                     return null;
                 }
-                self.advance();
+                _ = self.advance();
                 return self.parseFnDecl(true);
             },
             .struct_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseStructDecl();
             },
             .class_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseClassDecl();
             },
             .enum_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseEnumDecl();
             },
             .interface_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseInterfaceDecl();
             },
             .impl_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseImplBlock();
             },
             .import_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseImportDecl();
             },
             .prop_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parsePropDecl();
             },
             .let_kw, .mut_kw => {
@@ -263,7 +264,7 @@ pub const Parser = struct {
         self.skipNewlinesAndSemicolons();
         if (self.expectPeek(.arrow)) |_| {
             self.skipNewlinesAndSemicolons();
-            return_type = self.parseExpr(Precedence.none.toInt());
+            return_type = self.parseExpr(Precedence.prefix.toInt());
             self.skipNewlinesAndSemicolons();
         }
 
@@ -272,7 +273,7 @@ pub const Parser = struct {
         const body: NodeIdx = if (self.check(.lbrace))
             self.parseBlock() orelse return null
         else if (self.check(.eq)) blk: {
-            self.advance();
+            _ = self.advance();
             const expr = self.parseExpr(Precedence.none.toInt()) orelse NodeIdx.none;
             break :blk expr;
         } else {
@@ -294,13 +295,13 @@ pub const Parser = struct {
         const name_tok = self.expect(.identifier) orelse return null;
         const generic_params = self.parseGenericParams() orelse NodeList{ .indices = &.{} };
 
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var fields = std.ArrayList(NodeIdx).init(self.allocator);
-        var methods = std.ArrayList(NodeIdx).init(self.allocator);
+        var fields = std.ArrayList(NodeIdx).empty;
+        var methods = std.ArrayList(NodeIdx).empty;
         defer {
-            fields.deinit();
-            methods.deinit();
+            fields.deinit(self.allocator);
+            methods.deinit(self.allocator);
         }
 
         while (true) {
@@ -309,7 +310,7 @@ pub const Parser = struct {
 
             if (self.check(.fn_kw) or self.check(.override_kw)) {
                 const is_override = if (self.check(.override_kw)) blk: {
-                    self.advance();
+                    _ = self.advance();
                     break :blk true;
                 } else false;
                 if (!self.check(.fn_kw)) {
@@ -317,29 +318,29 @@ pub const Parser = struct {
                     self.recoverTo(.rbrace);
                     break;
                 }
-                self.advance();
+                _ = self.advance();
                 const method = self.parseFnDecl(is_override) orelse {
                     self.recoverTo(.rbrace);
                     break;
                 };
-                methods.append(method) catch unreachable;
+                methods.append(self.allocator, method) catch unreachable;
             } else if (self.check(.prop_kw)) {
-                self.advance();
+                _ = self.advance();
                 const prop = self.parsePropDecl() orelse {
                     self.recoverTo(.rbrace);
                     break;
                 };
-                methods.append(prop) catch unreachable;
+                methods.append(self.allocator, prop) catch unreachable;
             } else {
                 const field = self.parseField() orelse {
                     self.recoverTo(.rbrace);
                     break;
                 };
-                fields.append(field) catch unreachable;
+                fields.append(self.allocator, field) catch unreachable;
             }
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .struct_decl = .{
             .name = self.makeStringRef(name_tok),
             .generic_params = generic_params,
@@ -355,18 +356,18 @@ pub const Parser = struct {
         var parent: ?NodeIdx = null;
         self.skipNewlinesAndSemicolons();
         if (self.check(.lparen)) {
-            self.advance();
+            _ = self.advance();
             parent = self.parseExpr(Precedence.none.toInt());
-            self.expect(.rparen) orelse {};
+            _ = self.expect(.rparen);
         }
 
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var fields = std.ArrayList(NodeIdx).init(self.allocator);
-        var methods = std.ArrayList(NodeIdx).init(self.allocator);
+        var fields = std.ArrayList(NodeIdx).empty;
+        var methods = std.ArrayList(NodeIdx).empty;
         defer {
-            fields.deinit();
-            methods.deinit();
+            fields.deinit(self.allocator);
+            methods.deinit(self.allocator);
         }
 
         while (true) {
@@ -375,7 +376,7 @@ pub const Parser = struct {
 
             if (self.check(.fn_kw) or self.check(.override_kw)) {
                 const is_override = if (self.check(.override_kw)) blk: {
-                    self.advance();
+                    _ = self.advance();
                     break :blk true;
                 } else false;
                 if (!self.check(.fn_kw)) {
@@ -383,29 +384,29 @@ pub const Parser = struct {
                     self.recoverTo(.rbrace);
                     break;
                 }
-                self.advance();
+                _ = self.advance();
                 const method = self.parseFnDecl(is_override) orelse {
                     self.recoverTo(.rbrace);
                     break;
                 };
-                methods.append(method) catch unreachable;
+                methods.append(self.allocator, method) catch unreachable;
             } else if (self.check(.prop_kw)) {
-                self.advance();
+                _ = self.advance();
                 const prop = self.parsePropDecl() orelse {
                     self.recoverTo(.rbrace);
                     break;
                 };
-                methods.append(prop) catch unreachable;
+                methods.append(self.allocator, prop) catch unreachable;
             } else {
                 const field = self.parseField() orelse {
                     self.recoverTo(.rbrace);
                     break;
                 };
-                fields.append(field) catch unreachable;
+                fields.append(self.allocator, field) catch unreachable;
             }
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .class_decl = .{
             .name = self.makeStringRef(name_tok),
             .generic_params = generic_params,
@@ -419,10 +420,10 @@ pub const Parser = struct {
         const name_tok = self.expect(.identifier) orelse return null;
         const generic_params = self.parseGenericParams() orelse NodeList{ .indices = &.{} };
 
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var variants = std.ArrayList(NodeIdx).init(self.allocator);
-        defer variants.deinit();
+        var variants = std.ArrayList(NodeIdx).empty;
+        defer variants.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
@@ -433,34 +434,34 @@ pub const Parser = struct {
                 break;
             };
 
-            var variant_fields = std.ArrayList(NodeIdx).init(self.allocator);
-            defer variant_fields.deinit();
+            var variant_fields = std.ArrayList(NodeIdx).empty;
+            defer variant_fields.deinit(self.allocator);
 
             if (self.check(.lparen)) {
-                self.advance();
+                _ = self.advance();
                 while (true) {
                     self.skipNewlinesAndSemicolons();
                     if (self.check(.rparen)) break;
                     if (variant_fields.items.len > 0) {
-                        if (!self.expect(.comma)) break;
+                        if (self.expect(.comma) == null) break;
                         self.skipNewlinesAndSemicolons();
                         if (self.check(.rparen)) break;
                     }
                     const fld = self.parseExpr(Precedence.none.toInt()) orelse break;
-                    variant_fields.append(fld) catch unreachable;
+                    variant_fields.append(self.allocator, fld) catch unreachable;
                     self.skipNewlinesAndSemicolons();
                 }
-                self.expect(.rparen) orelse {};
+                _ = self.expect(.rparen);
             }
 
             const field_list = self.arena.allocNodeList(variant_fields.items) catch NodeList{ .indices = &.{} };
-            variants.append(self.appendNode(.{ .enum_variant = .{
+            variants.append(self.allocator, self.appendNode(.{ .enum_variant = .{
                 .name = self.makeStringRef(var_name),
                 .fields = field_list,
             } })) catch unreachable;
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .enum_decl = .{
             .name = self.makeStringRef(name_tok),
             .generic_params = generic_params,
@@ -472,10 +473,10 @@ pub const Parser = struct {
         const name_tok = self.expect(.identifier) orelse return null;
         const generic_params = self.parseGenericParams() orelse NodeList{ .indices = &.{} };
 
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var methods = std.ArrayList(NodeIdx).init(self.allocator);
-        defer methods.deinit();
+        var methods = std.ArrayList(NodeIdx).empty;
+        defer methods.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
@@ -486,7 +487,7 @@ pub const Parser = struct {
                 self.recoverTo(.rbrace);
                 break;
             }
-            self.advance();
+            _ = self.advance();
 
             const name_tok2 = self.expect(.identifier) orelse {
                 self.recoverTo(.rbrace);
@@ -504,7 +505,7 @@ pub const Parser = struct {
                 self.skipNewlinesAndSemicolons();
             }
 
-            methods.append(self.appendNode(.{ .fn_decl = .{
+            methods.append(self.allocator, self.appendNode(.{ .fn_decl = .{
                 .name = self.makeStringRef(name_tok2),
                 .generic_params = NodeList{ .indices = &.{} },
                 .params = params,
@@ -514,7 +515,7 @@ pub const Parser = struct {
             } })) catch unreachable;
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .interface_decl = .{
             .name = self.makeStringRef(name_tok),
             .generic_params = generic_params,
@@ -524,10 +525,10 @@ pub const Parser = struct {
 
     fn parseImplBlock(self: *Parser) ?NodeIdx {
         const self_type = self.parseExpr(Precedence.none.toInt()) orelse return null;
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var methods = std.ArrayList(NodeIdx).init(self.allocator);
-        defer methods.deinit();
+        var methods = std.ArrayList(NodeIdx).empty;
+        defer methods.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
@@ -538,15 +539,15 @@ pub const Parser = struct {
                 self.recoverTo(.rbrace);
                 break;
             }
-            self.advance();
+            _ = self.advance();
             const method = self.parseFnDecl(false) orelse {
                 self.recoverTo(.rbrace);
                 break;
             };
-            methods.append(method) catch unreachable;
+            methods.append(self.allocator, method) catch unreachable;
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .impl_block = .{
             .self_type = self_type,
             .methods = self.arena.allocNodeList(methods.items) catch NodeList{ .indices = &.{} },
@@ -554,24 +555,23 @@ pub const Parser = struct {
     }
 
     fn parseImportDecl(self: *Parser) ?NodeIdx {
-        var path_parts = std.ArrayList(NodeIdx).init(self.allocator);
-        defer path_parts.deinit();
+        var path_parts = std.ArrayList(NodeIdx).empty;
+        defer path_parts.deinit(self.allocator);
 
         const first = self.expect(.identifier) orelse return null;
-        path_parts.append(self.appendNode(.{ .identifier = self.makeStringRef(first) })) catch unreachable;
+        path_parts.append(self.allocator, self.appendNode(.{ .identifier = self.makeStringRef(first) })) catch unreachable;
 
         while (self.check(.colon) and self.peekNext().tag == .colon) {
-            self.advance();
-            self.advance();
+            _ = self.advance();
+            _ = self.advance();
             const part = self.expect(.identifier) orelse break;
-            path_parts.append(self.appendNode(.{ .identifier = self.makeStringRef(part) })) catch unreachable;
+            path_parts.append(self.allocator, self.appendNode(.{ .identifier = self.makeStringRef(part) })) catch unreachable;
         }
 
         var alias: ?StringRef = null;
         self.skipNewlinesAndSemicolons();
         if (self.expectPeek(.as_kw)) |_| {
-            const alias_tok = self.expect(.identifier) orelse {};
-            if (alias_tok) |tok| {
+            if (self.expect(.identifier)) |tok| {
                 alias = self.makeStringRef(tok);
             }
         }
@@ -584,10 +584,10 @@ pub const Parser = struct {
 
     fn parsePropDecl(self: *Parser) ?NodeIdx {
         const name_tok = self.expect(.identifier) orelse return null;
-        self.expect(.colon) orelse {};
+        _ = self.expect(.colon);
         const ty = self.parseExpr(Precedence.none.toInt()) orelse NodeIdx.none;
 
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
         var getter: ?NodeIdx = null;
         var setter: ?NodeIdx = null;
@@ -620,7 +620,7 @@ pub const Parser = struct {
             }
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         const getter_node = getter orelse NodeIdx.none;
         return self.appendNode(.{ .prop_decl = .{
             .name = self.makeStringRef(name_tok),
@@ -630,10 +630,19 @@ pub const Parser = struct {
         } });
     }
 
+    fn parseTypeRepr(self: *Parser) ?TypeRepr {
+        const expr = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
+        const node = self.arena.get(expr);
+        if (node.* == .unary_op and node.unary_op.op == .deref) {
+            return .{ .pointer = node.unary_op.operand };
+        }
+        return .{ .plain = expr };
+    }
+
     fn parseField(self: *Parser) ?NodeIdx {
         const name_tok = self.expect(.identifier) orelse return null;
-        self.expect(.colon) orelse {};
-        const ty = self.parseExpr(Precedence.none.toInt()) orelse NodeIdx.none;
+        if (self.expect(.colon) == null) return null;
+        const ty = self.parseTypeRepr() orelse return null;
         return self.appendNode(.{ .field = .{ .name = self.makeStringRef(name_tok), .ty = ty } });
     }
 
@@ -642,23 +651,42 @@ pub const Parser = struct {
         switch (tok.tag) {
             .let_kw, .mut_kw => return self.parseLetStmt(),
             .return_kw => {
-                self.advance();
+                _ = self.advance();
                 if (self.check(.newline) or self.check(.semicolon) or self.check(.rbrace) or self.check(.eof)) {
                     return self.appendNode(.{ .return_stmt = .{ .value = null } });
                 }
                 const value = self.parseExpr(Precedence.none.toInt()) orelse return null;
                 return self.appendNode(.{ .return_stmt = .{ .value = value } });
             },
-            .if_kw => return self.parseIfExpr(),
-            .while_kw => return self.parseWhileExpr(),
-            .for_kw => return self.parseForStmt(),
+            .if_kw => {
+                _ = self.advance();
+                return self.parseIfExpr();
+            },
+            .while_kw => {
+                _ = self.advance();
+                return self.parseWhileExpr();
+            },
+            .for_kw => {
+                _ = self.advance();
+                return self.parseForStmt();
+            },
             .defer_kw => {
-                self.advance();
+                _ = self.advance();
                 const expr = self.parseExpr(Precedence.none.toInt()) orelse return null;
                 return self.appendNode(.{ .defer_stmt = .{ .expr = expr } });
             },
             .lbrace => return self.parseBlock(),
-            .match_kw => return self.parseMatchExpr(),
+            .match_kw => {
+                _ = self.advance();
+                return self.parseMatchExpr();
+            },
+            .identifier => {
+                if (self.peekNext().tag == .colon) {
+                    return self.parseLetStmt();
+                }
+                const expr = self.parseExpr(Precedence.none.toInt()) orelse return null;
+                return self.appendNode(.{ .expr_stmt = .{ .expr = expr } });
+            },
             else => {
                 const expr = self.parseExpr(Precedence.none.toInt()) orelse return null;
                 return self.appendNode(.{ .expr_stmt = .{ .expr = expr } });
@@ -668,10 +696,12 @@ pub const Parser = struct {
 
     fn parseLetStmt(self: *Parser) ?NodeIdx {
         const mutable = if (self.check(.mut_kw)) blk: {
-            self.advance();
+            _ = self.advance();
             break :blk true;
         } else blk: {
-            self.advance();
+            if (self.check(.let_kw)) {
+                _ = self.advance();
+            }
             break :blk false;
         };
 
@@ -683,10 +713,15 @@ pub const Parser = struct {
         self.skipNewlinesAndSemicolons();
         if (self.expectPeek(.colon)) |_| {
             if (self.check(.eq)) {
-                self.advance();
+                _ = self.advance();
                 init_expr = self.parseExpr(Precedence.assignment.toInt());
             } else {
-                ty = self.parseExpr(Precedence.none.toInt());
+                const type_repr = self.parseTypeRepr() orelse return null;
+                ty = switch (type_repr) {
+                    .plain => |n| n,
+                    .pointer => |n| n,
+                    .generic_app => |g| g.base,
+                };
                 self.skipNewlinesAndSemicolons();
                 if (self.expectPeek(.eq)) |_| {
                     init_expr = self.parseExpr(Precedence.assignment.toInt());
@@ -741,13 +776,33 @@ pub const Parser = struct {
 
     fn parseForStmt(self: *Parser) ?NodeIdx {
         const name_tok = self.expect(.identifier) orelse return null;
-        self.expect(.in_kw) orelse return null;
+        if (self.expect(.in_kw) == null) return null;
 
         const start = self.parseExpr(Precedence.none.toInt()) orelse return null;
 
+        const range_start: NodeIdx = blk: {
+            const start_node = self.arena.get(start);
+            if (tagOf(start_node) == .range_expr) {
+                break :blk start_node.range_expr.start;
+            }
+            break :blk NodeIdx.none;
+        };
+
+        if (range_start != NodeIdx.none) {
+            const end = self.arena.get(start).range_expr.end;
+            self.skipNewlinesAndSemicolons();
+            const body = self.parseBlock() orelse return null;
+            return self.appendNode(.{ .for_range = .{
+                .var_name = self.makeStringRef(name_tok),
+                .start = range_start,
+                .end = end,
+                .body = body,
+            } });
+        }
+
         if (self.check(.dot) and self.peekNext().tag == .dot) {
-            self.advance();
-            self.advance();
+            _ = self.advance();
+            _ = self.advance();
             const end = self.parseExpr(Precedence.none.toInt()) orelse return null;
             self.skipNewlinesAndSemicolons();
             const body = self.parseBlock() orelse return null;
@@ -770,17 +825,17 @@ pub const Parser = struct {
 
     fn parseMatchExpr(self: *Parser) ?NodeIdx {
         const scrutinee = self.parseExpr(Precedence.none.toInt()) orelse return null;
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var arms = std.ArrayList(NodeIdx).init(self.allocator);
-        defer arms.deinit();
+        var arms = std.ArrayList(NodeIdx).empty;
+        defer arms.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
             if (self.check(.rbrace)) break;
 
             if (self.check(.comma)) {
-                self.advance();
+                _ = self.advance();
                 continue;
             }
 
@@ -789,21 +844,21 @@ pub const Parser = struct {
                 break;
             };
             self.skipNewlinesAndSemicolons();
-            self.expect(.fat_arrow) orelse {};
+            _ = self.expect(.fat_arrow);
             self.skipNewlinesAndSemicolons();
             const body = self.parseExpr(Precedence.none.toInt()) orelse {
                 self.recoverTo(.rbrace);
                 break;
             };
 
-            arms.append(self.appendNode(.{ .match_arm = .{ .pattern = pattern, .body = body } })) catch unreachable;
+            arms.append(self.allocator, self.appendNode(.{ .match_arm = .{ .pattern = pattern, .body = body } })) catch unreachable;
             self.skipNewlinesAndSemicolons();
             if (self.check(.comma)) {
-                self.advance();
+                _ = self.advance();
             }
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .match_expr = .{
             .scrutinee = scrutinee,
             .arms = self.arena.allocNodeList(arms.items) catch NodeList{ .indices = &.{} },
@@ -811,24 +866,24 @@ pub const Parser = struct {
     }
 
     fn parseBlock(self: *Parser) ?NodeIdx {
-        if (!self.expect(.lbrace)) return null;
+        if (self.expect(.lbrace) == null) return null;
 
-        var stmts = std.ArrayList(NodeIdx).init(self.allocator);
-        defer stmts.deinit();
+        var stmts = std.ArrayList(NodeIdx).empty;
+        defer stmts.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
             if (self.check(.rbrace) or self.check(.eof)) break;
 
             if (self.parseStmt()) |stmt| {
-                stmts.append(stmt) catch unreachable;
+                stmts.append(self.allocator, stmt) catch unreachable;
             } else {
                 self.recoverToNewlineOrBrace();
                 continue;
             }
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .block = .{
             .stmts = self.arena.allocNodeList(stmts.items) catch NodeList{ .indices = &.{} },
         } });
@@ -848,8 +903,8 @@ pub const Parser = struct {
             }
 
             if (tok.tag == .lbrace) {
-                if (self.peekNext().tag == .dot or self.peekNext().tag == .identifier or self.peekNext().tag == .rbrace) {
-                    self.advance();
+                if (self.peekNext().tag == .dot) {
+                    _ = self.advance();
                     left = self.parseStructInitBody(left);
                     continue;
                 }
@@ -863,8 +918,8 @@ pub const Parser = struct {
                 const next = self.peekNext();
                 if (next.tag == .dot) {
                     if (prec >= min_prec) {
-                        self.advance();
-                        self.advance();
+                        _ = self.advance();
+                        _ = self.advance();
                         const right = self.parseExpr(prec) orelse return null;
                         left = self.appendNode(.{ .range_expr = .{ .start = left, .end = right } });
                         continue;
@@ -873,7 +928,7 @@ pub const Parser = struct {
                 }
             }
 
-            self.advance();
+            _ = self.advance();
             left = self.parseInfix(left, tok, prec);
         }
 
@@ -885,7 +940,7 @@ pub const Parser = struct {
 
         switch (tok.tag) {
             .int_literal => {
-                self.advance();
+                _ = self.advance();
                 const val = std.fmt.parseInt(i64, tok.lexeme(self.source), 0) catch {
                     self.errorTok(tok, "invalid integer literal", .{});
                     return null;
@@ -893,7 +948,7 @@ pub const Parser = struct {
                 return self.appendNode(.{ .int_literal = val });
             },
             .float_literal => {
-                self.advance();
+                _ = self.advance();
                 const val = std.fmt.parseFloat(f64, tok.lexeme(self.source)) catch {
                     self.errorTok(tok, "invalid float literal", .{});
                     return null;
@@ -901,77 +956,77 @@ pub const Parser = struct {
                 return self.appendNode(.{ .float_literal = val });
             },
             .string_literal => {
-                self.advance();
+                _ = self.advance();
                 return self.appendNode(.{ .string_literal = self.makeStringRef(tok) });
             },
             .char_literal => {
-                self.advance();
+                _ = self.advance();
                 return self.appendNode(.{ .char_literal = self.makeStringRef(tok) });
             },
             .true_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.appendNode(.{ .bool_literal = true });
             },
             .false_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.appendNode(.{ .bool_literal = false });
             },
             .null_kw => {
-                self.advance();
-                return self.appendNode(.{ .null_literal });
+                _ = self.advance();
+                return self.appendNode(.{ .null_literal = {} });
             },
             .identifier => {
-                self.advance();
+                _ = self.advance();
                 return self.appendNode(.{ .identifier = self.makeStringRef(tok) });
             },
             .this_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.appendNode(.{ .identifier = self.makeStringRef(tok) });
             },
             .lparen => {
-                self.advance();
+                _ = self.advance();
                 const expr = self.parseExpr(Precedence.none.toInt()) orelse return null;
-                self.expect(.rparen) orelse {};
+                _ = self.expect(.rparen);
                 return self.appendNode(.{ .paren_expr = expr });
             },
             .lbrace => {
                 return self.parseBlock();
             },
             .if_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseIfExpr();
             },
             .match_kw => {
-                self.advance();
+                _ = self.advance();
                 return self.parseMatchExpr();
             },
             .minus => {
-                self.advance();
+                _ = self.advance();
                 const operand = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
                 return self.appendNode(.{ .unary_op = .{ .op = .neg, .operand = operand } });
             },
             .bang => {
-                self.advance();
+                _ = self.advance();
                 const operand = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
                 return self.appendNode(.{ .unary_op = .{ .op = .not, .operand = operand } });
             },
             .tilde => {
-                self.advance();
+                _ = self.advance();
                 const operand = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
                 return self.appendNode(.{ .unary_op = .{ .op = .bit_not, .operand = operand } });
             },
             .star => {
-                self.advance();
+                _ = self.advance();
                 const operand = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
                 return self.appendNode(.{ .unary_op = .{ .op = .deref, .operand = operand } });
             },
             .amp => {
-                self.advance();
+                _ = self.advance();
                 const operand = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
                 return self.appendNode(.{ .unary_op = .{ .op = .ref, .operand = operand } });
             },
             .plus => {
-                self.advance();
+                _ = self.advance();
                 return self.parseExpr(Precedence.prefix.toInt());
             },
             else => {
@@ -996,22 +1051,22 @@ pub const Parser = struct {
                 return self.appendNode(.{ .binary_op = .{ .op = op, .left = left, .right = right } });
             },
             .lparen => {
-                var args = std.ArrayList(NodeIdx).init(self.allocator);
-                defer args.deinit();
+                var args = std.ArrayList(NodeIdx).empty;
+                defer args.deinit(self.allocator);
 
                 while (true) {
                     self.skipNewlinesAndSemicolons();
                     if (self.check(.rparen)) break;
                     if (args.items.len > 0) {
-                        if (!self.expect(.comma)) break;
+                        if (self.expect(.comma) == null) break;
                         self.skipNewlinesAndSemicolons();
                         if (self.check(.rparen)) break;
                     }
                     const arg = self.parseExpr(Precedence.none.toInt()) orelse break;
-                    args.append(arg) catch unreachable;
+                    args.append(self.allocator, arg) catch unreachable;
                     self.skipNewlinesAndSemicolons();
                 }
-                self.expect(.rparen) orelse {};
+                _ = self.expect(.rparen);
 
                 return self.appendNode(.{ .call = .{
                     .func = left,
@@ -1020,7 +1075,7 @@ pub const Parser = struct {
             },
             .lbracket => {
                 const index = self.parseExpr(Precedence.none.toInt()) orelse return left;
-                self.expect(.rbracket) orelse {};
+                _ = self.expect(.rbracket);
                 return self.appendNode(.{ .index_access = .{ .object = left, .index = index } });
             },
             .dot => {
@@ -1034,31 +1089,31 @@ pub const Parser = struct {
     }
 
     fn parseStructInitBody(self: *Parser, ty: NodeIdx) NodeIdx {
-        var fields = std.ArrayList(NodeIdx).init(self.allocator);
-        defer fields.deinit();
+        var fields = std.ArrayList(NodeIdx).empty;
+        defer fields.deinit(self.allocator);
 
         while (true) {
             self.skipNewlinesAndSemicolons();
             if (self.check(.rbrace)) break;
             if (fields.items.len > 0) {
-                if (!self.expect(.comma)) break;
+                if (self.expect(.comma) == null) break;
                 self.skipNewlinesAndSemicolons();
                 if (self.check(.rbrace)) break;
             }
 
-            self.expect(.dot) orelse break;
+            if (self.expect(.dot) == null) break;
             const name_tok = self.expect(.identifier) orelse break;
-            self.expect(.eq) orelse break;
+            if (self.expect(.eq) == null) break;
             const value = self.parseExpr(Precedence.none.toInt()) orelse break;
 
-            fields.append(self.appendNode(.{ .struct_init_field = .{
+            fields.append(self.allocator, self.appendNode(.{ .struct_init_field = .{
                 .name = self.makeStringRef(name_tok),
                 .value = value,
             } })) catch unreachable;
             self.skipNewlinesAndSemicolons();
         }
 
-        self.expect(.rbrace) orelse {};
+        _ = self.expect(.rbrace);
         return self.appendNode(.{ .struct_init = .{
             .ty = ty,
             .fields = self.arena.allocNodeList(fields.items) catch NodeList{ .indices = &.{} },
@@ -1143,8 +1198,10 @@ const TestResult = struct { arena: ast.AstArena, node: NodeIdx };
 fn runTest(allocator: std.mem.Allocator, source: []const u8) !TestResult {
     var arena = ast.AstArena.init(allocator);
     var lex = @import("../lexer/lexer.zig").Lexer.init(allocator, source);
+    defer lex.deinit();
     const tokens = try lex.tokenize();
     var diags = diag.Diagnostics.init(allocator);
+    diags.owns_messages = true;
     var parser = Parser.init(allocator, tokens, source, &arena, &diags);
     const module = parser.parseModule();
     return TestResult{ .arena = arena, .node = module };
@@ -1155,7 +1212,7 @@ fn getMod(res: *const TestResult) *const Node {
 }
 
 fn tagOf(node: *const Node) std.meta.Tag(Node) {
-    return @tagName(node.*);
+    return std.meta.activeTag(node.*);
 }
 
 test "parser: empty module" {

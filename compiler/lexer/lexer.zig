@@ -120,6 +120,16 @@ pub const Lexer = struct {
     fn scanNumber(self: *Lexer) !void {
         const start = self.pos;
 
+        if (self.source[self.pos] == '.' and self.pos > 0 and self.source[self.pos - 1] == '.') {
+            try self.tokens.append(self.allocator, .{
+                .tag = .dot,
+                .start = start,
+                .end = self.pos + 1,
+            });
+            self.pos += 1;
+            return;
+        }
+
         if (self.source[self.pos] == '0' and self.peek(1) == 'x') {
             self.pos += 2;
             while (self.pos < self.source.len and std.ascii.isHex(self.source[self.pos])) {
@@ -134,7 +144,9 @@ pub const Lexer = struct {
             while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
                 self.pos += 1;
             }
-            if (self.pos < self.source.len and self.source[self.pos] == '.') {
+            if (self.pos < self.source.len and self.source[self.pos] == '.' and
+                !(self.pos + 1 < self.source.len and self.source[self.pos + 1] == '.'))
+            {
                 self.pos += 1;
                 while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
                     self.pos += 1;
@@ -166,12 +178,14 @@ pub const Lexer = struct {
         const start = self.pos;
         self.pos += 1;
 
+        var closed = false;
         while (self.pos < self.source.len) {
             const ch = self.source[self.pos];
             if (ch == '\\') {
                 self.pos += 2;
             } else if (ch == quote) {
                 self.pos += 1;
+                closed = true;
                 break;
             } else if (ch == '\n' or ch == '\r') {
                 return error.UnterminatedString;
@@ -179,6 +193,7 @@ pub const Lexer = struct {
                 self.pos += 1;
             }
         }
+        if (!closed) return error.UnterminatedString;
 
         const tag: TokenTag = if (quote == '"') .string_literal else .char_literal;
         try self.tokens.append(self.allocator, .{
@@ -195,7 +210,10 @@ pub const Lexer = struct {
         }
 
         const ident = self.source[start..self.pos];
-        const tag = token_mod.lookupKeyword(ident) orelse .identifier;
+        const tag: TokenTag = if (ident.len == 1 and ident[0] == '_')
+            .underscore
+        else
+            token_mod.lookupKeyword(ident) orelse .identifier;
 
         try self.tokens.append(self.allocator, .{
             .tag = tag,
@@ -435,7 +453,7 @@ test "lexer: line comments" {
     defer lexer.deinit();
 
     const tokens = try lexer.tokenize();
-    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
     try std.testing.expectEqual(TokenTag.fn_kw, tokens[0].tag);
     try std.testing.expectEqual(TokenTag.newline, tokens[1].tag);
     try std.testing.expectEqual(TokenTag.identifier, tokens[2].tag);
@@ -733,8 +751,7 @@ test "lexer: underscore identifiers" {
     try std.testing.expectEqualStrings("_foo", tokens[0].lexeme(lexer.source));
     try std.testing.expectEqual(TokenTag.identifier, tokens[1].tag);
     try std.testing.expectEqualStrings("_bar", tokens[1].lexeme(lexer.source));
-    try std.testing.expectEqual(TokenTag.identifier, tokens[2].tag);
-    try std.testing.expectEqualStrings("_", tokens[2].lexeme(lexer.source));
+    try std.testing.expectEqual(TokenTag.underscore, tokens[2].tag);
 }
 
 test "lexer: escape sequences in strings" {

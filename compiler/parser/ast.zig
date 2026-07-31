@@ -151,17 +151,23 @@ pub const TypeRepr = union(enum) {
 pub const AstArena = struct {
     nodes: std.ArrayListUnmanaged(Node),
     allocator: std.mem.Allocator,
+    list_allocs: std.ArrayListUnmanaged([]NodeIdx),
 
     pub fn init(allocator: std.mem.Allocator) AstArena {
         var arena = AstArena{
             .nodes = .empty,
             .allocator = allocator,
+            .list_allocs = .empty,
         };
         arena.nodes.append(allocator, undefined) catch unreachable;
         return arena;
     }
 
     pub fn deinit(self: *AstArena) void {
+        for (self.list_allocs.items) |slice| {
+            self.allocator.free(slice);
+        }
+        self.list_allocs.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
     }
 
@@ -178,6 +184,7 @@ pub const AstArena = struct {
     pub fn allocNodeList(self: *AstArena, indices: []const NodeIdx) !NodeList {
         const copy = try self.allocator.alloc(NodeIdx, indices.len);
         @memcpy(copy, indices);
+        try self.list_allocs.append(self.allocator, copy);
         return .{ .indices = copy };
     }
 };
