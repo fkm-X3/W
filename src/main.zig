@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const W = @import("W");
+const Wolframite = @import("Wolframite");
 
 pub fn main(init: std.process.Init) !void {
     // Prints to stderr, unbuffered, ignoring potential errors.
