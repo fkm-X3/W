@@ -1,0 +1,5 @@
+# Ignore stuff from main branch
+
+zig-out/bin/
+wolframite-vscode/
+.zig-cache/

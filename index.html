@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wolframite Programming Language</title>
+    <style>
+        :root {
+            --bg: #121214;
+            --card-bg: #1e1e24;
+            --text: #e1e1e6;
+            --accent: #ff6b4a;
+            --code-bg: #0d0d0f;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 2rem 0;
+        }
+
+        h1 {
+            color: var(--accent);
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .tagline {
+            font-size: 1.2rem;
+            opacity: 0.8;
+        }
+
+        main {
+            margin-top: 2rem;
+        }
+
+        section {
+            margin-bottom: 2.5rem;
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            padding: 1.25rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid #2a2a30;
+        }
+
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            color: #f8f8f2;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .button {
+            background-color: var(--accent);
+            color: #fff;
+            padding: 0.75rem 1.5rem;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: bold;
+            display: inline-block;
+            border: none;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        .button.secondary {
+            background-color: transparent;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+        }
+
+        /* Pop-up / Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-box {
+            background: var(--card-bg);
+            padding: 2rem;
+            border-radius: 12px;
+            border: 1px solid #2a2a30;
+            text-align: center;
+            max-width: 360px;
+            width: 90%;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }
+
+        .modal-box h3 {
+            margin-top: 0;
+            color: var(--accent);
+        }
+
+        footer {
+            margin-top: 4rem;
+            text-align: center;
+            font-size: 0.9rem;
+            opacity: 0.5;
+            border-top: 1px solid #2a2a30;
+            padding-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Wolframite</h1>
+        <p class="tagline">A fast, expressive, and lightweight programming language.</p>
+        <div class="cta-buttons" style="justify-content: center;">
+            <a href="#install" class="button">Get Started</a>
+            <button id="docsBtn" class="button secondary">Documentation</button>
+        </div>
+    </header>
+
+    <main>
+        <section id="about">
+            <h2>Why Wolframite?</h2>
+            <p>Wolframite combines concise syntax with powerful runtime safety, making high-performance computing straightforward and accessible.</p>
+        </section>
+
+        <section id="example">
+            <h2>Example Syntax</h2>
+            <pre><code>// Hello World in Wolframite
+fn main() {
+    print("Hello, Wolframite!");
+}</code></pre>
+        </section>
+
+        <section id="install">
+            <h2>Quick Install</h2>
+            <h3>Linux</h3>
+            <pre><code>curl -sSL https://placeholder/install.sh | sh</code></pre>
+            <h3>Windows</h3>
+            <pre><code>curl -sSL https://placeholder/install.ps1 | sh</code></pre>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Fkm_X3. Released under Apatche 2.0.</p>
+    </footer>
+
+    <!-- Pop-up Overlay -->
+    <div id="docsModal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Notice</h3>
+            <p>Doc's don't exist yet</p>
+            <button id="closeModal" class="button" style="margin-top: 1rem;">Close</button>
+        </div>
+    </div>
+
+    <script>
+        const docsBtn = document.getElementById('docsBtn');
+        const docsModal = document.getElementById('docsModal');
+        const closeModal = document.getElementById('closeModal');
+
+        // Open modal
+        docsBtn.addEventListener('click', () => {
+            docsModal.style.display = 'flex';
+        });
+
+        // Close modal via button
+        closeModal.addEventListener('click', () => {
+            docsModal.style.display = 'none';
+        });
+
+        // Close modal when clicking dark backdrop
+        docsModal.addEventListener('click', (e) => {
+            if (e.target === docsModal) {
+                docsModal.style.display = 'none';
+            }
+        });
+    </script>
+
+</body>
+</html>
