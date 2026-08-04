@@ -313,6 +313,13 @@ pub const TypeChecker = struct {
                 _ = self.inferExprType(d.expr);
                 self.setNodeType(stmt_idx, self.void_ty);
             },
+            .print_stmt => |p| {
+                const arg_ty = self.inferExprType(p.value);
+                if (!self.typesEqual(arg_ty, self.string_ty)) {
+                    self.errorAt(stmt_idx, "print expects a String argument, got '{s}'", .{self.typeName(arg_ty)});
+                }
+                self.setNodeType(stmt_idx, self.void_ty);
+            },
             .if_expr => |i| {
                 const cond_ty = self.inferExprType(i.cond);
                 if (!self.typesEqual(cond_ty, self.bool_ty)) {
@@ -945,4 +952,34 @@ test "typecheck: comparison returns bool" {
         res.diagnostics.deinit();
     }
     try std.testing.expect(!res.diagnostics.hasErrors());
+}
+
+test "typecheck: print statement" {
+    var res = try runCheck(std.testing.allocator,
+        \\fn main() -> i32 {
+        \\    print("hello")
+        \\    return 42
+        \\}
+    );
+    defer {
+        res.arena.deinit();
+        res.type_pool.deinit();
+        res.diagnostics.deinit();
+    }
+    try std.testing.expect(!res.diagnostics.hasErrors());
+}
+
+test "typecheck: print rejects non-String argument" {
+    var res = try runCheck(std.testing.allocator,
+        \\fn main() -> i32 {
+        \\    print(42)
+        \\    return 42
+        \\}
+    );
+    defer {
+        res.arena.deinit();
+        res.type_pool.deinit();
+        res.diagnostics.deinit();
+    }
+    try std.testing.expect(res.diagnostics.hasErrors());
 }

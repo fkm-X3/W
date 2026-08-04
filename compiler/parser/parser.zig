@@ -677,6 +677,11 @@ pub const Parser = struct {
                 const expr = self.parseExpr(Precedence.none.toInt()) orelse return null;
                 return self.appendNode(.{ .defer_stmt = .{ .expr = expr } });
             },
+            .print_kw => {
+                _ = self.advance();
+                const value = self.parseExpr(Precedence.none.toInt()) orelse return null;
+                return self.appendNode(.{ .print_stmt = .{ .value = value } });
+            },
             .lbrace => return self.parseBlock(),
             .match_kw => {
                 _ = self.advance();
@@ -1081,7 +1086,8 @@ pub const Parser = struct {
                 return self.appendNode(.{ .index_access = .{ .object = left, .index = index } });
             },
             .dot => {
-                const field_tok = self.expect(.identifier) orelse return left;
+                // Keywords like `print` are valid after a dot (e.g. `io.print`).
+                const field_tok = if (self.check(.print_kw)) self.advance() else (self.expect(.identifier) orelse return left);
                 return self.appendNode(.{ .field_access = .{ .object = left, .field = self.makeStringRef(field_tok) } });
             },
             else => {
@@ -1423,7 +1429,7 @@ test "parser: let with inferred type" {
 test "parser: call expression" {
     var res = try runTest(std.testing.allocator,
         \\fn main() {
-        \\    print("hello")
+        \\    foo("hello")
         \\}
     );
     defer res.arena.deinit();
@@ -1432,6 +1438,52 @@ test "parser: call expression" {
     const stmt = res.arena.get(body.block.stmts.indices[0]);
     const call = res.arena.get(stmt.expr_stmt.expr);
     try std.testing.expectEqual(@as(std.meta.Tag(Node), .call), tagOf(call));
+}
+
+test "parser: print statement" {
+    var res = try runTest(std.testing.allocator,
+        \\fn main() {
+        \\    print("hello")
+        \\}
+    );
+    defer res.arena.deinit();
+    const decl = res.arena.get(getMod(&res).module.decls.indices[0]);
+    const body = res.arena.get(decl.fn_decl.body);
+    const stmt = res.arena.get(body.block.stmts.indices[0]);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .print_stmt), tagOf(stmt));
+    const arg = res.arena.get(stmt.print_stmt.value);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .paren_expr), tagOf(arg));
+}
+
+test "parser: print statement without parens" {
+    var res = try runTest(std.testing.allocator,
+        \\fn main() {
+        \\    print "hello"
+        \\}
+    );
+    defer res.arena.deinit();
+    const decl = res.arena.get(getMod(&res).module.decls.indices[0]);
+    const body = res.arena.get(decl.fn_decl.body);
+    const stmt = res.arena.get(body.block.stmts.indices[0]);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .print_stmt), tagOf(stmt));
+    const arg = res.arena.get(stmt.print_stmt.value);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .string_literal), tagOf(arg));
+}
+
+test "parser: print as field name after dot" {
+    var res = try runTest(std.testing.allocator,
+        \\fn main() {
+        \\    io.print("hello")
+        \\}
+    );
+    defer res.arena.deinit();
+    const decl = res.arena.get(getMod(&res).module.decls.indices[0]);
+    const body = res.arena.get(decl.fn_decl.body);
+    const stmt = res.arena.get(body.block.stmts.indices[0]);
+    const call = res.arena.get(stmt.expr_stmt.expr);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .call), tagOf(call));
+    const callee = res.arena.get(call.call.func);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .field_access), tagOf(callee));
 }
 
 test "parser: method call with field access" {

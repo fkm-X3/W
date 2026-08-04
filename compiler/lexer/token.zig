@@ -34,6 +34,7 @@ pub const TokenTag = enum(u8) {
     this_kw,
     final_kw,
     prop_kw,
+    print_kw,
 
     // Operators
     plus,
@@ -114,6 +115,7 @@ pub const TokenTag = enum(u8) {
             .this_kw => "this",
             .final_kw => "final",
             .prop_kw => "prop",
+            .print_kw => "print",
             .plus => "+",
             .minus => "-",
             .star => "*",
@@ -201,6 +203,7 @@ pub const KEYWORDS = init: {
         .{ "this", .this_kw },
         .{ "final", .final_kw },
         .{ "prop", .prop_kw },
+        .{ "print", .print_kw },
     };
 
     const Map = std.StaticStringMap(TokenTag);
@@ -228,6 +231,7 @@ test "Token lexeme from source" {
 test "lookupKeyword finds keywords" {
     try std.testing.expectEqual(@as(?TokenTag, .fn_kw), lookupKeyword("fn"));
     try std.testing.expectEqual(@as(?TokenTag, .return_kw), lookupKeyword("return"));
+    try std.testing.expectEqual(@as(?TokenTag, .print_kw), lookupKeyword("print"));
     try std.testing.expectEqual(@as(?TokenTag, null), lookupKeyword("foo"));
     try std.testing.expectEqual(@as(?TokenTag, null), lookupKeyword("Fn"));
 }

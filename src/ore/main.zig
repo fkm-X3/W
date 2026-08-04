@@ -107,6 +107,7 @@ fn cmdInit(gpa: Allocator, io: Io, args: []const []const u8) !u8 {
     defer main_file.close(io);
     writeFile(io, main_file,
         \\fn main() -> i32 {
+        \\    print("Hello, world!")
         \\    return 42
         \\}
         \\

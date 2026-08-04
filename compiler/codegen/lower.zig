@@ -313,6 +313,7 @@ pub const Lowerer = struct {
             .return_stmt => |r| try self.lowerReturn(r),
             .expr_stmt => |e| _ = try self.lowerExpr(e.expr),
             .defer_stmt => |d| try self.pending_defers.append(self.gpa, d.expr),
+            .print_stmt => |p| try self.lowerPrint(node_idx, p),
             .if_expr => try self.lowerIf(node_idx),
             .while_expr => try self.lowerWhile(node_idx),
             .for_range => try self.lowerForRange(node_idx),
@@ -384,6 +385,21 @@ pub const Lowerer = struct {
             else => 8,
         };
         return self.ctx.buildAllocaBytes(self.ptr_ty, size);
+    }
+
+    /// Lower a `print <expr>` statement to a call to the C runtime's `puts`.
+    /// The String value is a pointer to a `[len][data]` block; `puts` takes a
+    /// NUL-terminated C string, so the data pointer is passed.
+    fn lowerPrint(self: *Lowerer, node_idx: NodeIdx, p: anytype) !void {
+        const val = try self.lowerExpr(p.value);
+        const sem = self.type_pool.get(self.exprType(p.value));
+        if (sem != .string_type) {
+            self.codegenError(node_idx, "print supports only String values for now", .{});
+            return;
+        }
+        const data_addr = try self.ctx.buildPtrAdd(self.ptr_ty, val, try self.ctx.buildIntConst(self.i64_ty, @intCast(string_mod.data_offset)));
+        const data_ptr = try self.ctx.buildLoad(self.ptr_ty, data_addr);
+        _ = try self.ctx.buildExternCall("puts", self.void_ty, &.{data_ptr});
     }
 
     fn lowerReturn(self: *Lowerer, r: anytype) !void {
@@ -1299,6 +1315,21 @@ test "lower: class new with vtable and malloc" {
     try std.testing.expect(std.mem.indexOf(u8, text, "global @vtable_Animal = fn_array [") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "malloc") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "global_addr @vtable_Animal") != null);
+}
+
+test "lower: print statement emits extern puts call" {
+    var res = try checkLower(std.testing.allocator,
+        \\fn main() -> i32 {
+        \\    print("hello")
+        \\    return 42
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "extern puts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "extern_call puts(%") != null);
 }
 
 test "lower: string literal pool" {

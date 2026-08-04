@@ -86,6 +86,7 @@ pub const Node = union(enum) {
     return_stmt: struct { value: ?NodeIdx },
     expr_stmt: struct { expr: NodeIdx },
     defer_stmt: struct { expr: NodeIdx },
+    print_stmt: struct { value: NodeIdx },
 
     // Declarations
     fn_decl: struct {

@@ -332,6 +332,9 @@ pub const Resolver = struct {
             .defer_stmt => |d| {
                 try self.resolveExpr(d.expr);
             },
+            .print_stmt => |p| {
+                try self.resolveExpr(p.value);
+            },
             .if_expr => |i| {
                 try self.resolveExpr(i.cond);
                 try self.resolveStmt(i.then_body);
@@ -455,7 +458,7 @@ pub const Resolver = struct {
             },
             .param, .field, .enum_variant, .match_arm, .struct_init_field => {},
             .module, .fn_decl, .struct_decl, .class_decl, .enum_decl, .interface_decl, .impl_block, .prop_decl, .import_decl => {},
-            .let_stmt, .return_stmt, .expr_stmt, .defer_stmt, .while_expr, .for_range, .for_each => {},
+            .let_stmt, .return_stmt, .expr_stmt, .defer_stmt, .print_stmt, .while_expr, .for_range, .for_each => {},
         }
     }
 };
