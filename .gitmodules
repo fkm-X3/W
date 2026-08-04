@@ -1,6 +1,3 @@
 [submodule "libs/STD"]
 	path = libs/STD
 	url = https://github.com/fkm-X3/Wolframite-STD
-[submodule "libs/backend"]
-	path = libs/backend
-	url = https://github.com/fkm-X3/Tungsten.git
