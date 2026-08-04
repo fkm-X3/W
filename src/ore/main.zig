@@ -16,7 +16,7 @@ const link_mod = @import("link.zig");
 const update_mod = @import("update.zig");
 const diag_mod = @import("compiler").diagnostics;
 
-const version_string = "0.1.0";
+const version_string = "Dev (unstable)";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();

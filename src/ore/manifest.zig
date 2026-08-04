@@ -7,7 +7,7 @@
 //! ```toml
 //! [package]
 //! name = "hello"
-//! version = "0.1.0"
+//! version = "Dev (unstable)"
 //! entry = "src/main.wfr"
 //! ```
 //!
@@ -19,7 +19,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Manifest = struct {
     name: []const u8 = "unnamed",
-    version: []const u8 = "0.1.0",
+    version: []const u8 = "Dev (unstable)",
     /// Source file compiled by `ore build` / `ore run` when no file is given.
     entry: []const u8 = "src/main.wfr",
 
@@ -104,7 +104,7 @@ test "manifest: parse full document" {
 test "manifest: missing fields fall back to defaults" {
     const manifest = try Manifest.parse(std.testing.allocator, "[package]\nname = \"x\"\n");
     try std.testing.expectEqualStrings("x", manifest.name);
-    try std.testing.expectEqualStrings("0.1.0", manifest.version);
+    try std.testing.expectEqualStrings("Dev (unstable)", manifest.version);
     try std.testing.expectEqualStrings("src/main.wfr", manifest.entry);
 }
 
