@@ -1,0 +1,936 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+// ============================================================================
+// Handles - compact, typed, 32-bit integer indices into flat arrays
+// ============================================================================
+
+/// An SSA value. Function parameters occupy values `0..param_count`.
+/// The result of the instruction at index `N` in a function's instruction
+/// list is `Value(param_count + N)`.
+pub const Value = enum(u32) {
+    none = 0,
+    _,
+};
+
+pub const TypeIdx = enum(u32) { _ };
+pub const InstructionIdx = enum(u32) { _ };
+pub const BasicBlockIdx = enum(u32) { _ };
+pub const FunctionIdx = enum(u32) { _ };
+
+// ============================================================================
+// Opcode
+// ============================================================================
+
+pub const Opcode = enum(u8) {
+    // Constants
+    iconst,
+    fconst,
+    // Arithmetic
+    add,
+    sub,
+    mul,
+    sdiv,
+    udiv,
+    srem,
+    urem,
+    // Bitwise
+    and_op,
+    or_op,
+    xor_op,
+    shl,
+    shr,
+    // Floating point
+    fadd,
+    fsub,
+    fmul,
+    fdiv,
+    // Comparison
+    icmp_eq,
+    icmp_ne,
+    icmp_slt,
+    icmp_sle,
+    icmp_sgt,
+    icmp_sge,
+    icmp_ult,
+    icmp_ule,
+    icmp_ugt,
+    icmp_uge,
+    fcmp_oeq,
+    fcmp_one,
+    fcmp_olt,
+    fcmp_ole,
+    fcmp_ogt,
+    fcmp_oge,
+    // Control flow
+    br,
+    cond_br,
+    ret,
+    ret_void,
+    call,
+    call_ptr,
+    // Memory
+    alloca,
+    load,
+    store,
+    ptr_add,
+    malloc,
+    // Globals
+    global_addr,
+    // SSA
+    phi,
+};
+
+// ============================================================================
+// Instruction
+// ============================================================================
+
+pub const OperandSlice = struct {
+    start: u32,
+    len: u16,
+};
+
+pub const Instruction = struct {
+    opcode: Opcode,
+    type_idx: TypeIdx,
+    operands: OperandSlice,
+
+    /// Returns whether this opcode produces an SSA value.
+    pub fn producesValue(self: Instruction) bool {
+        return switch (self.opcode) {
+            .br, .cond_br, .ret, .ret_void, .store => false,
+            else => true,
+        };
+    }
+};
+
+// ============================================================================
+// BasicBlock
+// ============================================================================
+
+pub const BasicBlock = struct {
+    first_inst: InstructionIdx,
+    inst_count: u32,
+};
+
+// ============================================================================
+// Types
+// ============================================================================
+
+pub const IrType = union(enum) {
+    void,
+    bool_type,
+    int: IntType,
+    float: FloatType,
+    pointer: PointerType,
+    function: FunctionType,
+};
+
+pub const IntType = struct {
+    signed: bool,
+    bits: u16,
+};
+
+pub const FloatType = enum(u16) {
+    f16 = 16,
+    f32 = 32,
+    f64 = 64,
+};
+
+pub const PointerType = struct {
+    elem: TypeIdx,
+};
+
+pub const FunctionType = struct {
+    return_type: TypeIdx,
+    param_types: []const TypeIdx,
+};
+
+// ============================================================================
+// String Pool
+// ============================================================================
+
+pub const StringRef = struct {
+    start: u32,
+    len: u32,
+};
+
+pub const StringPool = struct {
+    buffer: std.ArrayList(u8),
+
+    pub const empty: StringPool = .{ .buffer = .empty };
+
+    pub fn deinit(self: *StringPool, gpa: Allocator) void {
+        self.buffer.deinit(gpa);
+    }
+
+    pub fn intern(self: *StringPool, gpa: Allocator, s: []const u8) !StringRef {
+        const start: u32 = @intCast(self.buffer.items.len);
+        try self.buffer.appendSlice(gpa, s);
+        return .{ .start = start, .len = @intCast(s.len) };
+    }
+
+    pub fn get(self: StringPool, ref: StringRef) []const u8 {
+        return self.buffer.items[ref.start..][0..ref.len];
+    }
+};
+
+// ============================================================================
+// Globals
+// ============================================================================
+
+pub const GlobalIdx = enum(u32) { _ };
+
+/// A module-level global value, placed in the .data section of the emitted
+/// assembly and addressed via the `global_addr` instruction.
+pub const Global = struct {
+    name: StringRef,
+    kind: GlobalKind,
+};
+
+pub const GlobalKind = union(enum) {
+    /// NUL-terminated byte string (a string literal).
+    string: StringRef,
+    /// Array of function pointers, one per virtual method (a vtable).
+    /// Entries are indices into `Module.functions`.
+    fn_array: []const u32,
+};
+
+// ============================================================================
+// Function
+// ============================================================================
+
+pub const Function = struct {
+    name: StringRef,
+    return_type: TypeIdx,
+    param_count: u32,
+    blocks: std.ArrayList(BasicBlock),
+    instructions: std.ArrayList(Instruction),
+    /// Operand pool: flat u32 array referenced by Instruction.operands
+    extra_data: std.ArrayList(u32),
+
+    pub const empty: Function = .{
+        .name = .{ .start = 0, .len = 0 },
+        .return_type = @enumFromInt(0),
+        .param_count = 0,
+        .blocks = .empty,
+        .instructions = .empty,
+        .extra_data = .empty,
+    };
+
+    pub fn deinit(self: *Function, gpa: Allocator) void {
+        self.blocks.deinit(gpa);
+        self.instructions.deinit(gpa);
+        self.extra_data.deinit(gpa);
+    }
+
+    pub fn getOperand(self: Function, val: Value) u32 {
+        return self.extra_data.items[@intFromEnum(val)];
+    }
+
+    pub fn getOperands(self: Function, slice: OperandSlice) []const u32 {
+        return self.extra_data.items[slice.start..][0..slice.len];
+    }
+};
+
+// ============================================================================
+// Module
+// ============================================================================
+
+pub const Module = struct {
+    functions: std.ArrayList(Function),
+    types: std.ArrayList(IrType),
+    strings: StringPool,
+    globals: std.ArrayList(Global),
+
+    pub const empty: Module = .{
+        .functions = .empty,
+        .types = .empty,
+        .strings = StringPool.empty,
+        .globals = .empty,
+    };
+
+    pub fn deinit(self: *Module, gpa: Allocator) void {
+        for (self.functions.items) |*f| f.deinit(gpa);
+        self.functions.deinit(gpa);
+        for (self.types.items) |ty| switch (ty) {
+            .function => |ft| gpa.free(ft.param_types),
+            else => {},
+        };
+        self.types.deinit(gpa);
+        self.strings.deinit(gpa);
+        for (self.globals.items) |global| switch (global.kind) {
+            .string => {},
+            .fn_array => |arr| gpa.free(arr),
+        };
+        self.globals.deinit(gpa);
+    }
+
+    pub fn addType(self: *Module, gpa: Allocator, ir_type: IrType) !TypeIdx {
+        const idx: u32 = @intCast(self.types.items.len);
+        try self.types.append(gpa, ir_type);
+        return @enumFromInt(idx);
+    }
+
+    pub fn getIrType(self: Module, idx: TypeIdx) IrType {
+        return self.types.items[@intFromEnum(idx)];
+    }
+
+    pub fn addGlobal(self: *Module, gpa: Allocator, name: []const u8, kind: GlobalKind) !GlobalIdx {
+        const name_ref = try self.strings.intern(gpa, name);
+        const idx: u32 = @intCast(self.globals.items.len);
+        try self.globals.append(gpa, .{ .name = name_ref, .kind = kind });
+        return @enumFromInt(idx);
+    }
+
+    pub fn getGlobal(self: Module, idx: GlobalIdx) Global {
+        return self.globals.items[@intFromEnum(idx)];
+    }
+};
+
+// ============================================================================
+// Builder - convenience API for constructing IR
+// ============================================================================
+
+pub const Builder = struct {
+    gpa: Allocator,
+    module: *Module,
+    current_func: ?FunctionIdx,
+    current_block: ?BasicBlockIdx,
+
+    pub fn init(gpa: Allocator, module: *Module) Builder {
+        return .{
+            .gpa = gpa,
+            .module = module,
+            .current_func = null,
+            .current_block = null,
+        };
+    }
+
+    pub fn setCurrentFunction(self: *Builder, func: FunctionIdx) void {
+        self.current_func = func;
+        self.current_block = null;
+    }
+
+    pub fn setCurrentBlock(self: *Builder, block: BasicBlockIdx) void {
+        self.current_block = block;
+        // Pin the block's first_inst to the current end of the instruction
+        // list so that all subsequent appends land in this block.
+        const func = self.getCurrentFunction();
+        func.blocks.items[@intFromEnum(block)].first_inst =
+            @enumFromInt(@as(u32, @intCast(func.instructions.items.len)));
+    }
+
+    // -- Type helpers --
+
+    pub fn addVoidType(self: *Builder) !TypeIdx {
+        return self.module.addType(self.gpa, .void);
+    }
+
+    pub fn addBoolType(self: *Builder) !TypeIdx {
+        return self.module.addType(self.gpa, .bool_type);
+    }
+
+    pub fn addIntType(self: *Builder, signed: bool, bits: u16) !TypeIdx {
+        return self.module.addType(self.gpa, .{ .int = .{ .signed = signed, .bits = bits } });
+    }
+
+    pub fn addFloatType(self: *Builder, float: FloatType) !TypeIdx {
+        return self.module.addType(self.gpa, .{ .float = float });
+    }
+
+    pub fn addPointerType(self: *Builder, elem: TypeIdx) !TypeIdx {
+        return self.module.addType(self.gpa, .{ .pointer = .{ .elem = elem } });
+    }
+
+    pub fn addFunctionType(self: *Builder, ret: TypeIdx, param_types: []const TypeIdx) !TypeIdx {
+        const owned = try self.gpa.dupe(TypeIdx, param_types);
+        return self.module.addType(self.gpa, .{ .function = .{
+            .return_type = ret,
+            .param_types = owned,
+        } });
+    }
+
+    // -- Function --
+
+    pub fn addFunction(self: *Builder, name: []const u8, return_type: TypeIdx, param_count: u32) !FunctionIdx {
+        const name_ref = try self.module.strings.intern(self.gpa, name);
+        const idx: u32 = @intCast(self.module.functions.items.len);
+        var func = Function.empty;
+        func.name = name_ref;
+        func.return_type = return_type;
+        func.param_count = param_count;
+        try self.module.functions.append(self.gpa, func);
+        return @enumFromInt(idx);
+    }
+
+    pub fn getCurrentFunction(self: *Builder) *Function {
+        return &self.module.functions.items[@intFromEnum(self.current_func.?)];
+    }
+
+    // -- Globals --
+
+    /// Add a string-literal global. The data is interned in the module's
+    /// string pool and emitted NUL-terminated in the .data section.
+    pub fn addStringGlobal(self: *Builder, name: []const u8, data: []const u8) !GlobalIdx {
+        const data_ref = try self.module.strings.intern(self.gpa, data);
+        return self.module.addGlobal(self.gpa, name, .{ .string = data_ref });
+    }
+
+    /// Add a vtable global: an array of function pointers, one per virtual
+    /// method, in declaration order.
+    pub fn addFnArrayGlobal(self: *Builder, name: []const u8, funcs: []const FunctionIdx) !GlobalIdx {
+        const owned = try self.gpa.alloc(u32, funcs.len);
+        for (funcs, 0..) |func, i| owned[i] = @intFromEnum(func);
+        return self.module.addGlobal(self.gpa, name, .{ .fn_array = owned });
+    }
+
+    // -- Basic Blocks --
+
+    pub fn appendBlock(self: *Builder) !BasicBlockIdx {
+        const func = self.getCurrentFunction();
+        const idx: u32 = @intCast(func.blocks.items.len);
+        try func.blocks.append(self.gpa, .{
+            .first_inst = @enumFromInt(@as(u32, @intCast(func.instructions.items.len))),
+            .inst_count = 0,
+        });
+        return @enumFromInt(idx);
+    }
+
+    pub fn getCurrentBlock(self: *Builder) *BasicBlock {
+        return &self.getCurrentFunction().blocks.items[@intFromEnum(self.current_block.?)];
+    }
+
+    // -- Operand helpers --
+
+    fn appendOperands(self: *Builder, operands: []const u32) !OperandSlice {
+        const func = self.getCurrentFunction();
+        const start: u32 = @intCast(func.extra_data.items.len);
+        try func.extra_data.appendSlice(self.gpa, operands);
+        return .{ .start = start, .len = @intCast(operands.len) };
+    }
+
+    fn appendInstruction(self: *Builder, inst: Instruction) !Value {
+        const func = self.getCurrentFunction();
+        const block = self.getCurrentBlock();
+        const idx: u32 = @intCast(func.instructions.items.len);
+        try func.instructions.append(self.gpa, inst);
+        block.inst_count += 1;
+        if (inst.producesValue()) {
+            // Function parameters occupy values 0..param_count-1, so
+            // instruction results start at param_count (matches codegen).
+            return @enumFromInt(func.param_count + idx);
+        }
+        return .none;
+    }
+
+    // -- Instruction builders --
+
+    /// Materialize an integer constant. The value is sign-extended to 64 bits
+    /// in the emitted code.
+    pub fn buildIntConst(self: *Builder, type_idx: TypeIdx, value: i64) !Value {
+        const bits: u64 = @bitCast(value);
+        return self.appendInstruction(.{
+            .opcode = .iconst,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{ @truncate(bits), @truncate(bits >> 32) }),
+        });
+    }
+
+    /// Materialize a floating-point constant.
+    pub fn buildFloatConst(self: *Builder, type_idx: TypeIdx, value: f64) !Value {
+        const bits: u64 = @bitCast(value);
+        return self.appendInstruction(.{
+            .opcode = .fconst,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{ @truncate(bits), @truncate(bits >> 32) }),
+        });
+    }
+
+    fn buildBinOp(self: *Builder, opcode: Opcode, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.appendInstruction(.{
+            .opcode = opcode,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{ @intFromEnum(lhs), @intFromEnum(rhs) }),
+        });
+    }
+
+    pub fn buildAdd(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.add, type_idx, lhs, rhs);
+    }
+
+    pub fn buildSub(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.sub, type_idx, lhs, rhs);
+    }
+
+    pub fn buildMul(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.mul, type_idx, lhs, rhs);
+    }
+
+    pub fn buildSDiv(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.sdiv, type_idx, lhs, rhs);
+    }
+
+    pub fn buildUDiv(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.udiv, type_idx, lhs, rhs);
+    }
+
+    pub fn buildSRem(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.srem, type_idx, lhs, rhs);
+    }
+
+    pub fn buildURem(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.urem, type_idx, lhs, rhs);
+    }
+
+    pub fn buildFAdd(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.fadd, type_idx, lhs, rhs);
+    }
+
+    pub fn buildFSub(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.fsub, type_idx, lhs, rhs);
+    }
+
+    pub fn buildFMul(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.fmul, type_idx, lhs, rhs);
+    }
+
+    pub fn buildFDiv(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.fdiv, type_idx, lhs, rhs);
+    }
+
+    pub fn buildAnd(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.and_op, type_idx, lhs, rhs);
+    }
+
+    pub fn buildOr(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.or_op, type_idx, lhs, rhs);
+    }
+
+    pub fn buildXor(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.xor_op, type_idx, lhs, rhs);
+    }
+
+    pub fn buildShl(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.shl, type_idx, lhs, rhs);
+    }
+
+    pub fn buildShr(self: *Builder, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(.shr, type_idx, lhs, rhs);
+    }
+
+    pub fn buildIcmp(self: *Builder, cond: Opcode, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(cond, type_idx, lhs, rhs);
+    }
+
+    pub fn buildFCmp(self: *Builder, cond: Opcode, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.buildBinOp(cond, type_idx, lhs, rhs);
+    }
+
+    pub fn buildBr(self: *Builder, target: BasicBlockIdx) !Value {
+        return self.appendInstruction(.{
+            .opcode = .br,
+            .type_idx = @enumFromInt(0),
+            .operands = try self.appendOperands(&.{@intFromEnum(target)}),
+        });
+    }
+
+    pub fn buildCondBr(self: *Builder, cond: Value, true_block: BasicBlockIdx, false_block: BasicBlockIdx) !Value {
+        return self.appendInstruction(.{
+            .opcode = .cond_br,
+            .type_idx = @enumFromInt(0),
+            .operands = try self.appendOperands(&.{ @intFromEnum(cond), @intFromEnum(true_block), @intFromEnum(false_block) }),
+        });
+    }
+
+    pub fn buildRet(self: *Builder, val: Value) !Value {
+        return self.appendInstruction(.{
+            .opcode = .ret,
+            .type_idx = @enumFromInt(0),
+            .operands = try self.appendOperands(&.{@intFromEnum(val)}),
+        });
+    }
+
+    pub fn buildRetVoid(self: *Builder) !Value {
+        return self.appendInstruction(.{
+            .opcode = .ret_void,
+            .type_idx = @enumFromInt(0),
+            .operands = try self.appendOperands(&.{}),
+        });
+    }
+
+    pub fn buildCall(self: *Builder, func_idx: FunctionIdx, type_idx: TypeIdx, args: []const Value) !Value {
+        var ops = std.ArrayList(u32).empty;
+        defer ops.deinit(self.gpa);
+        try ops.append(self.gpa, @intFromEnum(func_idx));
+        for (args) |arg| {
+            try ops.append(self.gpa, @intFromEnum(arg));
+        }
+        return self.appendInstruction(.{
+            .opcode = .call,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(ops.items),
+        });
+    }
+
+    /// Call the function pointer `callee` (an SSA value) with the given args.
+    pub fn buildCallPtr(self: *Builder, type_idx: TypeIdx, callee: Value, args: []const Value) !Value {
+        var ops = std.ArrayList(u32).empty;
+        defer ops.deinit(self.gpa);
+        try ops.append(self.gpa, @intFromEnum(callee));
+        for (args) |arg| {
+            try ops.append(self.gpa, @intFromEnum(arg));
+        }
+        return self.appendInstruction(.{
+            .opcode = .call_ptr,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(ops.items),
+        });
+    }
+
+    pub fn buildAlloca(self: *Builder, type_idx: TypeIdx) !Value {
+        return self.appendInstruction(.{
+            .opcode = .alloca,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{}),
+        });
+    }
+
+    /// Allocate `size_bytes` of stack space, aligned to 8 bytes.
+    ///
+    /// Returns a pointer to the start of the block. Multiple allocas get
+    /// disjoint frame regions, so this is safe for aggregates (structs,
+    /// `[len][ptr]` string representations, etc.) that do not fit in a
+    /// single 8-byte slot.
+    pub fn buildAllocaBytes(self: *Builder, type_idx: TypeIdx, size_bytes: u32) !Value {
+        return self.appendInstruction(.{
+            .opcode = .alloca,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{size_bytes}),
+        });
+    }
+
+    pub fn buildLoad(self: *Builder, type_idx: TypeIdx, ptr: Value) !Value {
+        return self.appendInstruction(.{
+            .opcode = .load,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{@intFromEnum(ptr)}),
+        });
+    }
+
+    pub fn buildStore(self: *Builder, type_idx: TypeIdx, ptr: Value, val: Value) !Value {
+        return self.appendInstruction(.{
+            .opcode = .store,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{ @intFromEnum(ptr), @intFromEnum(val) }),
+        });
+    }
+
+    pub fn buildPhi(self: *Builder, type_idx: TypeIdx, incoming: []const PhiIncoming) !Value {
+        var ops = std.ArrayList(u32).empty;
+        defer ops.deinit(self.gpa);
+        for (incoming) |inc| {
+            try ops.append(self.gpa, @intFromEnum(inc.value));
+            try ops.append(self.gpa, @intFromEnum(inc.block));
+        }
+        return self.appendInstruction(.{
+            .opcode = .phi,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(ops.items),
+        });
+    }
+
+    /// Compute `ptr + offset` (unscaled byte offset).
+    pub fn buildPtrAdd(self: *Builder, type_idx: TypeIdx, ptr: Value, offset: Value) !Value {
+        return self.buildBinOp(.ptr_add, type_idx, ptr, offset);
+    }
+
+    /// Heap-allocate `size` bytes. Returns a pointer to the allocation.
+    pub fn buildMalloc(self: *Builder, type_idx: TypeIdx, size: Value) !Value {
+        return self.appendInstruction(.{
+            .opcode = .malloc,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{@intFromEnum(size)}),
+        });
+    }
+
+    /// Take the address of a module-level global.
+    pub fn buildGlobalAddr(self: *Builder, type_idx: TypeIdx, global: GlobalIdx) !Value {
+        return self.appendInstruction(.{
+            .opcode = .global_addr,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{@intFromEnum(global)}),
+        });
+    }
+};
+
+pub const PhiIncoming = struct {
+    value: Value,
+    block: BasicBlockIdx,
+};
+
+// ============================================================================
+// Textual IR Printer
+// ============================================================================
+
+pub fn printModule(module: *Module, writer: anytype) !void {
+    // `writer` is a pointer to an std.Io.Writer (or compatible) whose methods
+    // mutate the writer through the pointer.
+    const w = writer;
+    for (module.globals.items) |global| {
+        const name = module.strings.get(global.name);
+        switch (global.kind) {
+            .string => |data| {
+                try w.print("global @{s} = string \"", .{name});
+                const bytes = module.strings.get(data);
+                for (bytes) |byte| {
+                    switch (byte) {
+                        '"' => try w.writeAll("\\\""),
+                        '\\' => try w.writeAll("\\\\"),
+                        else => try w.writeByte(byte),
+                    }
+                }
+                try w.print("\"\n", .{});
+            },
+            .fn_array => |funcs| {
+                try w.print("global @{s} = fn_array [", .{name});
+                for (funcs, 0..) |func, i| {
+                    if (i > 0) try w.print(", ", .{});
+                    try w.print("@fn{d}", .{func});
+                }
+                try w.print("]\n", .{});
+            },
+        }
+    }
+
+    for (module.functions.items) |func| {
+        const name = module.strings.get(func.name);
+        try w.print("fn @{s}() {{\n", .{name});
+
+        for (func.blocks.items, 0..) |block, block_idx| {
+            try w.print("  bb{}:\n", .{block_idx});
+
+            const start = @intFromEnum(block.first_inst);
+            const end = start + block.inst_count;
+            for (func.instructions.items[start..end], 0..) |inst, i| {
+                const inst_idx = start + i;
+                try w.print("    ", .{});
+                if (inst.producesValue()) {
+                    try w.print("%{d} = ", .{func.param_count + inst_idx});
+                }
+                try printInstruction(module, func, inst, w);
+                try w.print("\n", .{});
+            }
+        }
+
+        try w.print("}}\n\n", .{});
+    }
+}
+
+fn printInstruction(module: *Module, func: Function, inst: Instruction, writer: anytype) !void {
+    const w = writer;
+    const ops = func.getOperands(inst.operands);
+    switch (inst.opcode) {
+        .iconst => try w.print("iconst {d}", .{@as(i64, @bitCast((@as(u64, ops[1]) << 32) | ops[0]))}),
+        .fconst => try w.print("fconst {d}", .{@as(f64, @bitCast((@as(u64, ops[1]) << 32) | ops[0]))}),
+        .add => try w.print("add %{d}, %{d}", .{ ops[0], ops[1] }),
+        .sub => try w.print("sub %{d}, %{d}", .{ ops[0], ops[1] }),
+        .mul => try w.print("mul %{d}, %{d}", .{ ops[0], ops[1] }),
+        .sdiv => try w.print("sdiv %{d}, %{d}", .{ ops[0], ops[1] }),
+        .udiv => try w.print("udiv %{d}, %{d}", .{ ops[0], ops[1] }),
+        .srem => try w.print("srem %{d}, %{d}", .{ ops[0], ops[1] }),
+        .urem => try w.print("urem %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fadd => try w.print("fadd %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fsub => try w.print("fsub %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fmul => try w.print("fmul %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fdiv => try w.print("fdiv %{d}, %{d}", .{ ops[0], ops[1] }),
+        .and_op => try w.print("and %{d}, %{d}", .{ ops[0], ops[1] }),
+        .or_op => try w.print("or %{d}, %{d}", .{ ops[0], ops[1] }),
+        .xor_op => try w.print("xor %{d}, %{d}", .{ ops[0], ops[1] }),
+        .shl => try w.print("shl %{d}, %{d}", .{ ops[0], ops[1] }),
+        .shr => try w.print("shr %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_eq => try w.print("icmp eq %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_ne => try w.print("icmp ne %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_slt => try w.print("icmp slt %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_sle => try w.print("icmp sle %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_sgt => try w.print("icmp sgt %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_sge => try w.print("icmp sge %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_ult => try w.print("icmp ult %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_ule => try w.print("icmp ule %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_ugt => try w.print("icmp ugt %{d}, %{d}", .{ ops[0], ops[1] }),
+        .icmp_uge => try w.print("icmp uge %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fcmp_oeq => try w.print("fcmp oeq %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fcmp_one => try w.print("fcmp one %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fcmp_olt => try w.print("fcmp olt %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fcmp_ole => try w.print("fcmp ole %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fcmp_ogt => try w.print("fcmp ogt %{d}, %{d}", .{ ops[0], ops[1] }),
+        .fcmp_oge => try w.print("fcmp oge %{d}, %{d}", .{ ops[0], ops[1] }),
+        .br => try w.print("br bb{d}", .{ops[0]}),
+        .cond_br => try w.print("cond_br %{d}, bb{d}, bb{d}", .{ ops[0], ops[1], ops[2] }),
+        .ret => try w.print("ret %{d}", .{ops[0]}),
+        .ret_void => try w.print("ret_void", .{}),
+        .call => {
+            try w.print("call @fn{d}(", .{ops[0]});
+            for (ops[1..], 0..) |arg, i| {
+                if (i > 0) try w.print(", ", .{});
+                try w.print("%{d}", .{arg});
+            }
+            try w.print(")", .{});
+        },
+        .call_ptr => {
+            try w.print("call_ptr %{d}(", .{ops[0]});
+            for (ops[1..], 0..) |arg, i| {
+                if (i > 0) try w.print(", ", .{});
+                try w.print("%{d}", .{arg});
+            }
+            try w.print(")", .{});
+        },
+        .ptr_add => try w.print("ptr_add %{d}, %{d}", .{ ops[0], ops[1] }),
+        .malloc => try w.print("malloc %{d}", .{ops[0]}),
+        .global_addr => {
+            const gname = module.strings.get(module.globals.items[ops[0]].name);
+            try w.print("global_addr @{s}", .{gname});
+        },
+        .alloca => {
+            if (ops.len == 0) {
+                try w.print("alloca", .{});
+            } else {
+                try w.print("alloca {d}", .{ops[0]});
+            }
+        },
+        .load => try w.print("load %{d}", .{ops[0]}),
+        .store => try w.print("store %{d}, %{d}", .{ ops[0], ops[1] }),
+        .phi => {
+            try w.print("phi ", .{});
+            var i: usize = 0;
+            while (i + 1 < ops.len) : (i += 2) {
+                try w.print("[ %{d}, bb{d} ] ", .{ ops[i], ops[i + 1] });
+            }
+        },
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "basic module construction" {
+    var module = Module.empty;
+    defer module.deinit(std.testing.allocator);
+
+    var builder = Builder.init(std.testing.allocator, &module);
+    _ = try builder.addVoidType();
+    const i32_type = try builder.addIntType(false, 32);
+
+    const func = try builder.addFunction("main", i32_type, 0);
+    builder.setCurrentFunction(func);
+
+    const entry = try builder.appendBlock();
+    builder.setCurrentBlock(entry);
+
+    _ = try builder.buildRet(@enumFromInt(0));
+
+    try std.testing.expectEqual(@as(usize, 1), module.functions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), module.functions.items[0].blocks.items.len);
+    try std.testing.expectEqual(@as(usize, 1), module.functions.items[0].instructions.items.len);
+}
+
+test "fibonacci construction" {
+    var module = Module.empty;
+    defer module.deinit(std.testing.allocator);
+
+    var builder = Builder.init(std.testing.allocator, &module);
+    const i32_type = try builder.addIntType(true, 32);
+
+    const fib = try builder.addFunction("fib", i32_type, 1);
+    builder.setCurrentFunction(fib);
+
+    const entry = try builder.appendBlock();
+    builder.setCurrentBlock(entry);
+
+    // %cond = icmp sle %n, 1
+    const n_param = @as(Value, @enumFromInt(0));
+    const one = @as(Value, @enumFromInt(1));
+    _ = one;
+    const cond = try builder.buildIcmp(.icmp_sle, i32_type, n_param, @enumFromInt(0));
+
+    const base = try builder.appendBlock();
+    const recurse = try builder.appendBlock();
+    _ = try builder.buildCondBr(cond, base, recurse);
+
+    builder.setCurrentBlock(base);
+    _ = try builder.buildRet(n_param);
+
+    builder.setCurrentBlock(recurse);
+    _ = try builder.buildRet(n_param);
+
+    try std.testing.expectEqual(@as(usize, 3), module.functions.items[0].blocks.items.len);
+}
+
+test "extended opcodes and globals" {
+    var module = Module.empty;
+    defer module.deinit(std.testing.allocator);
+
+    var builder = Builder.init(std.testing.allocator, &module);
+    const void_ty = try builder.addVoidType();
+    const i64_ty = try builder.addIntType(true, 64);
+    const f64_ty = try builder.addFloatType(.f64);
+    const ptr_ty = try builder.addPointerType(i64_ty);
+
+    const helper = try builder.addFunction("helper", void_ty, 0);
+    builder.setCurrentFunction(helper);
+    const h_entry = try builder.appendBlock();
+    builder.setCurrentBlock(h_entry);
+    _ = try builder.buildRetVoid();
+
+    const str_global = try builder.addStringGlobal("greeting", "hello");
+    _ = try builder.addFnArrayGlobal("vtable", &.{helper});
+
+    const main = try builder.addFunction("main", i64_ty, 2);
+    builder.setCurrentFunction(main);
+    const entry = try builder.appendBlock();
+    builder.setCurrentBlock(entry);
+
+    const a = @as(Value, @enumFromInt(0));
+    const b = @as(Value, @enumFromInt(1));
+
+    _ = try builder.buildIntConst(i64_ty, 10);
+    _ = try builder.buildFloatConst(f64_ty, 1.5);
+    _ = try builder.buildSRem(i64_ty, a, b);
+    _ = try builder.buildURem(i64_ty, a, b);
+    _ = try builder.buildFAdd(f64_ty, a, b);
+    _ = try builder.buildFSub(f64_ty, a, b);
+    _ = try builder.buildFMul(f64_ty, a, b);
+    _ = try builder.buildFDiv(f64_ty, a, b);
+    _ = try builder.buildFCmp(.fcmp_olt, f64_ty, a, b);
+    _ = try builder.buildFCmp(.fcmp_oge, f64_ty, a, b);
+    _ = try builder.buildPtrAdd(ptr_ty, a, b);
+    _ = try builder.buildMalloc(ptr_ty, a);
+    const sptr = try builder.buildGlobalAddr(ptr_ty, str_global);
+    _ = try builder.buildCallPtr(i64_ty, sptr, &.{ a, b });
+    _ = try builder.buildRet(a);
+
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try printModule(&module, &w);
+    const text = buf[0..w.end];
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "global @greeting = string \"hello\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "global @vtable = fn_array [@fn0]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ret_void") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "iconst 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fconst 1.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "srem %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "urem %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fadd %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fsub %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fmul %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fdiv %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fcmp olt %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "fcmp oge %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ptr_add %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "malloc %0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "global_addr @greeting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "call_ptr %14(%0, %1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ret %0") != null);
+}
