@@ -1172,6 +1172,22 @@ test "lower: arithmetic and calls" {
     try std.testing.expect(std.mem.indexOf(u8, text, "call @fn0(%") != null);
 }
 
+test "lower: expression-body fn shorthand returns its value" {
+    var res = try checkLower(std.testing.allocator,
+        \\fn dbl(x: i32) -> i32 = x * 2
+        \\fn main() -> i32 {
+        \\    return dbl(21)
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "mul %0, %1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ret %2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "call @fn0(%") != null);
+}
+
 test "lower: if statement with else and assignment" {
     var res = try checkLower(std.testing.allocator,
         \\fn sign(x: i32) -> i32 {

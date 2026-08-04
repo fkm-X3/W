@@ -90,6 +90,31 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    // ore — the Wolframite package manager CLI. It drives the same compiler
+    // pipeline as the library, so it imports both the `compiler` module and
+    // the Tungsten backend.
+    const ore_exe = b.addExecutable(.{
+        .name = "ore",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ore/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "compiler", .module = compiler_mod },
+                .{ .name = "Tungsten", .module = tungsten_mod },
+            },
+        }),
+    });
+    b.installArtifact(ore_exe);
+
+    const run_ore_cmd = b.addRunArtifact(ore_exe);
+    run_ore_cmd.step.dependOn(b.getInstallStep());
+    const ore_step = b.step("ore", "Run the ore CLI");
+    ore_step.dependOn(&run_ore_cmd.step);
+    if (b.args) |args| {
+        run_ore_cmd.addArgs(args);
+    }
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -148,6 +173,12 @@ pub fn build(b: *std.Build) void {
     });
     const run_backend_tests = b.addRunArtifact(backend_tests);
 
+    // ore CLI module tests
+    const ore_tests = b.addTest(.{
+        .root_module = ore_exe.root_module,
+    });
+    const run_ore_tests = b.addRunArtifact(ore_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -156,6 +187,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_compiler_tests.step);
     test_step.dependOn(&run_backend_tests.step);
+    test_step.dependOn(&run_ore_tests.step);
 
     const test_compiler_step = b.step("test-compiler", "Run compiler tests");
     test_compiler_step.dependOn(&run_compiler_tests.step);

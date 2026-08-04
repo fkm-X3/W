@@ -275,7 +275,9 @@ pub const Parser = struct {
         else if (self.check(.eq)) blk: {
             _ = self.advance();
             const expr = self.parseExpr(Precedence.none.toInt()) orelse NodeIdx.none;
-            break :blk expr;
+            // Wrap the shorthand expression in an implicit `return` so the
+            // semantic and lowering passes treat it as a statement.
+            break :blk self.appendNode(.{ .return_stmt = .{ .value = expr } });
         } else {
             self.errorHere("expected '{{' or '=' for function body", .{});
             return null;
@@ -1482,7 +1484,10 @@ test "parser: single-expression function" {
     const decl = res.arena.get(getMod(&res).module.decls.indices[0]);
     try std.testing.expectEqual(@as(std.meta.Tag(Node), .fn_decl), tagOf(decl));
     const body = res.arena.get(decl.fn_decl.body);
-    try std.testing.expectEqual(@as(std.meta.Tag(Node), .binary_op), tagOf(body));
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .return_stmt), tagOf(body));
+    const ret = body.return_stmt;
+    try std.testing.expect(ret.value != null);
+    try std.testing.expectEqual(@as(std.meta.Tag(Node), .binary_op), tagOf(res.arena.get(ret.value.?)));
 }
 
 test "parser: override method" {
