@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("W", .{
+    const mod = b.addModule("Wolframite", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
-        .name = "W",
+        .name = "Wolframite",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                .{ .name = "W", .module = mod },
+                .{ .name = "Wolframite", .module = mod },
                 .{ .name = "compiler", .module = compiler_mod },
             },
         }),
