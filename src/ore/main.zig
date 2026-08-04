@@ -1,8 +1,10 @@
 //! ore — the Wolframite package manager.
 //!
 //! Currently a single-file build tool wrapping the full compiler pipeline
-//! (see `compile.zig`), with package scaffolding (`init`) and a run mode that
-//! assembles + links via `nasm` and `zig cc` (`run`, `build --emit-bin`).
+//! (see `compile.zig`), with package scaffolding (`init`), a run mode that
+//! assembles + links via `nasm` and `zig cc` (`run`, `build --emit-bin`),
+//! and a self-update command that installs new ore releases (which bundle
+//! the compiler) from GitHub (`update`).
 
 const std = @import("std");
 const Io = std.Io;
@@ -11,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const manifest_mod = @import("manifest.zig");
 const compile_mod = @import("compile.zig");
 const link_mod = @import("link.zig");
+const update_mod = @import("update.zig");
 const diag_mod = @import("compiler").diagnostics;
 
 const version_string = "0.1.0";
@@ -26,6 +29,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const command = args[1];
+
+    // Internal entrypoint used by the self-update helper process.
+    if (std.mem.eql(u8, command, update_mod.apply_update_marker)) {
+        std.process.exit(update_mod.applyUpdate(gpa, io, args[2..]) catch 1);
+    }
+
     if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "help")) {
         printHelp(io);
         return;
@@ -46,6 +55,7 @@ fn runCommand(gpa: Allocator, io: Io, command: []const u8, rest: []const []const
     if (std.mem.eql(u8, command, "init")) return cmdInit(gpa, io, rest);
     if (std.mem.eql(u8, command, "build")) return cmdBuild(gpa, io, rest);
     if (std.mem.eql(u8, command, "run")) return cmdRun(gpa, io, rest);
+    if (std.mem.eql(u8, command, "update")) return cmdUpdate(gpa, io, rest);
 
     reportErr(io, "error: unknown command '{s}'\n", .{command});
     printHelp(io);
@@ -303,6 +313,115 @@ fn cmdRun(gpa: Allocator, io: Io, args: []const []const u8) !u8 {
 }
 
 // ============================================================================
+// update
+// ============================================================================
+
+fn cmdUpdate(gpa: Allocator, io: Io, args: []const []const u8) !u8 {
+    var opts: update_mod.Options = .{};
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            printUpdateHelp(io);
+            return 0;
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            opts.check_only = true;
+        } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--release")) {
+            if (i + 1 >= args.len) return flagNeedsValue(io, arg);
+            i += 1;
+            opts.release = args[i];
+        } else if (arg.len > 0 and arg[0] == '-') {
+            reportErr(io, "error: unknown option '{s}'\n", .{arg});
+            return 2;
+        } else {
+            reportErr(io, "error: unexpected argument '{s}'\n", .{arg});
+            return 2;
+        }
+    }
+
+    const report = update_mod.run(gpa, io, opts) catch |err| switch (err) {
+        error.UnsupportedPlatform => {
+            reportErr(io, "error: no published ore binary for this platform yet\n", .{});
+            return 1;
+        },
+        error.ReleaseNotFound => {
+            reportErr(io, "error: release '{s}' does not exist or has no ore binary\n", .{opts.release});
+            return 1;
+        },
+        error.ReplaceFailed => {
+            reportErr(io, "error: downloaded the update but could not replace '{s}'\n", .{"ore"});
+            return 1;
+        },
+        error.OutOfMemory => {
+            reportErr(io, "error: out of memory during update\n", .{});
+            return 1;
+        },
+        else => {
+            reportErr(io, "error: update failed: {s}\n", .{@errorName(err)});
+            return 1;
+        },
+    };
+
+    if (opts.check_only) {
+        printUpdateStatus(io, report.latest_sha);
+        return 0;
+    }
+
+    printOut(io, "installed {s} ({d} bytes)\n", .{ report.url, report.size });
+    if (report.latest_sha.len > 0) {
+        printOut(io, "commit {s}\n", .{report.latest_sha});
+    }
+    printOut(io, "ore now bundles the Wolfram compiler from that commit.\n", .{});
+    if (report.staged) {
+        printOut(io, "ore will swap itself into place and exit; run `ore` again to use the new version\n", .{});
+    } else {
+        printOut(io, "the next time you run ore, it will be the new version\n", .{});
+    }
+    return 0;
+}
+
+/// Print whether the running ore is behind the `release` tag's commit.
+fn printUpdateStatus(io: Io, latest_sha: []const u8) void {
+    const build_options = @import("build_options");
+    if (build_options.git_sha.len == 0) {
+        if (latest_sha.len == 0) {
+            printOut(io, "could not determine the latest build (offline or release missing)\n", .{});
+        } else {
+            printOut(io, "this ore was built outside CI (commit unknown); latest dev build is {s}\n", .{latest_sha});
+        }
+        return;
+    }
+    if (latest_sha.len == 0) {
+        printOut(io, "could not determine the latest build (offline or release missing)\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, build_options.git_sha, latest_sha)) {
+        printOut(io, "up to date (commit {s})\n", .{latest_sha});
+    } else {
+        printOut(io, "update available: {s} -> {s}\n", .{ build_options.git_sha, latest_sha });
+        printOut(io, "run `ore update` to install it\n", .{});
+    }
+}
+
+fn printUpdateHelp(io: Io) void {
+    printOut(io,
+        \\Usage:
+        \\  ore update [options]
+        \\
+        \\Update ore and the Wolfram compiler bundled inside it. Downloads the
+        \\rolling "dev" release (republished by CI on every commit) and swaps
+        \\the current executable for the new one.
+        \\
+        \\Options:
+        \\      --check           Only report whether an update is available
+        \\  -r, --release <tag>   Install from a different release tag (default: dev)
+        \\  -h, --help            Show this help
+        \\
+    , .{});
+}
+
+// ============================================================================
 // Shared helpers
 // ============================================================================
 
@@ -415,6 +534,7 @@ fn printHelp(io: Io) void {
         \\  init [name]      Scaffold a new package (ore.toml + src/main.wfr)
         \\  build [file]     Compile a .wfr file (or the package entry) to NASM assembly
         \\  run [file]       Compile, assemble, link (nasm + zig cc), and execute
+        \\  update           Update ore (and its bundled compiler) from GitHub releases
         \\
         \\Options:
         \\  -h, --help       Show this help

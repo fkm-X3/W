@@ -46,6 +46,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Commit SHA baked into ore, used by `ore update --check` to decide
+    // whether a newer dev build is available. Pass `-Dgit-sha=$(git rev-parse HEAD)`.
+    const ore_build_options = b.addOptions();
+    ore_build_options.addOption(
+        []const u8,
+        "git_sha",
+        b.option([]const u8, "git-sha", "git commit SHA to embed in ore") orelse "",
+    );
+    const ore_build_options_mod = ore_build_options.createModule();
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -102,6 +112,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "compiler", .module = compiler_mod },
                 .{ .name = "Tungsten", .module = tungsten_mod },
+                .{ .name = "build_options", .module = ore_build_options_mod },
             },
         }),
     });
