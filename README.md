@@ -8,10 +8,10 @@ Wolframite, the lang built ontop of Tungsten
 
 ### Linux
 ```sh
-curl -sSL https://fkm-x3.github.io/Wolframite/install.sh | sh
+curl -sSL https://fkm.is-a.dev/Wolframite/install.sh | sh
 ```
 
 ### Windows
 ```ps1
-irm https://fkm-x3.github.io/Wolframite/install.ps1 | iex
+irm https://fkm.is-a.dev/Wolframite/install.ps1 | iex
 ```
