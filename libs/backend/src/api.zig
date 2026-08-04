@@ -371,6 +371,11 @@ pub const Context = struct {
         return self.builder.buildCallPtr(type_idx, callee, args);
     }
 
+    /// Build a call to an external C function by name (e.g. `puts`).
+    pub fn buildExternCall(self: *Context, name: []const u8, type_idx: TypeIdx, args: []const Value) !Value {
+        return self.builder.buildExternCall(name, type_idx, args);
+    }
+
     // ========================================================================
     // Instruction Building — Memory
     // ========================================================================

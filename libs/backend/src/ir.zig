@@ -69,6 +69,9 @@ pub const Opcode = enum(u8) {
     ret_void,
     call,
     call_ptr,
+    /// Call an external C function (declared with `extern` in the emitted
+    /// assembly). Operand 0 is an index into `Module.externs`.
+    extern_call,
     // Memory
     alloca,
     load,
@@ -98,7 +101,7 @@ pub const Instruction = struct {
     /// Returns whether this opcode produces an SSA value.
     pub fn producesValue(self: Instruction) bool {
         return switch (self.opcode) {
-            .br, .cond_br, .ret, .ret_void, .store => false,
+            .br, .cond_br, .ret, .ret_void, .store, .extern_call => false,
             else => true,
         };
     }
@@ -234,6 +237,16 @@ pub const Function = struct {
 };
 
 // ============================================================================
+// Externals
+// ============================================================================
+
+/// An external C function referenced by the module (e.g. `puts`, `malloc`).
+/// Emitted as an `extern <name>` declaration in the assembly.
+pub const ExternFunc = struct {
+    name: StringRef,
+};
+
+// ============================================================================
 // Module
 // ============================================================================
 
@@ -242,12 +255,14 @@ pub const Module = struct {
     types: std.ArrayList(IrType),
     strings: StringPool,
     globals: std.ArrayList(Global),
+    externs: std.ArrayList(ExternFunc),
 
     pub const empty: Module = .{
         .functions = .empty,
         .types = .empty,
         .strings = StringPool.empty,
         .globals = .empty,
+        .externs = .empty,
     };
 
     pub fn deinit(self: *Module, gpa: Allocator) void {
@@ -264,6 +279,7 @@ pub const Module = struct {
             .fn_array => |arr| gpa.free(arr),
         };
         self.globals.deinit(gpa);
+        self.externs.deinit(gpa);
     }
 
     pub fn addType(self: *Module, gpa: Allocator, ir_type: IrType) !TypeIdx {
@@ -588,6 +604,35 @@ pub const Builder = struct {
         });
     }
 
+    /// Declare an external C function (deduplicated by name) and return its
+    /// index into `Module.externs`.
+    pub fn addExtern(self: *Builder, name: []const u8) !u32 {
+        for (self.module.externs.items, 0..) |ext, i| {
+            if (std.mem.eql(u8, self.module.strings.get(ext.name), name)) {
+                return @intCast(i);
+            }
+        }
+        const name_ref = try self.module.strings.intern(self.gpa, name);
+        try self.module.externs.append(self.gpa, .{ .name = name_ref });
+        return @intCast(self.module.externs.items.len - 1);
+    }
+
+    /// Call an external C function by name. Does not produce an SSA value.
+    pub fn buildExternCall(self: *Builder, name: []const u8, type_idx: TypeIdx, args: []const Value) !Value {
+        const ext_idx = try self.addExtern(name);
+        var ops = std.ArrayList(u32).empty;
+        defer ops.deinit(self.gpa);
+        try ops.append(self.gpa, ext_idx);
+        for (args) |arg| {
+            try ops.append(self.gpa, @intFromEnum(arg));
+        }
+        return self.appendInstruction(.{
+            .opcode = .extern_call,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(ops.items),
+        });
+    }
+
     pub fn buildAlloca(self: *Builder, type_idx: TypeIdx) !Value {
         return self.appendInstruction(.{
             .opcode = .alloca,
@@ -677,6 +722,10 @@ pub fn printModule(module: *Module, writer: anytype) !void {
     // `writer` is a pointer to an std.Io.Writer (or compatible) whose methods
     // mutate the writer through the pointer.
     const w = writer;
+    for (module.externs.items) |ext| {
+        try w.print("extern {s}\n", .{module.strings.get(ext.name)});
+    }
+
     for (module.globals.items) |global| {
         const name = module.strings.get(global.name);
         switch (global.kind) {
@@ -779,6 +828,15 @@ fn printInstruction(module: *Module, func: Function, inst: Instruction, writer: 
         },
         .call_ptr => {
             try w.print("call_ptr %{d}(", .{ops[0]});
+            for (ops[1..], 0..) |arg, i| {
+                if (i > 0) try w.print(", ", .{});
+                try w.print("%{d}", .{arg});
+            }
+            try w.print(")", .{});
+        },
+        .extern_call => {
+            const ext_name = module.strings.get(module.externs.items[ops[0]].name);
+            try w.print("extern_call {s}(", .{ext_name});
             for (ops[1..], 0..) |arg, i| {
                 if (i > 0) try w.print(", ", .{});
                 try w.print("%{d}", .{arg});
@@ -908,6 +966,7 @@ test "extended opcodes and globals" {
     _ = try builder.buildMalloc(ptr_ty, a);
     const sptr = try builder.buildGlobalAddr(ptr_ty, str_global);
     _ = try builder.buildCallPtr(i64_ty, sptr, &.{ a, b });
+    _ = try builder.buildExternCall("puts", void_ty, &.{a});
     _ = try builder.buildRet(a);
 
     var buf: [4096]u8 = undefined;
@@ -932,5 +991,7 @@ test "extended opcodes and globals" {
     try std.testing.expect(std.mem.indexOf(u8, text, "malloc %0") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "global_addr @greeting") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "call_ptr %14(%0, %1)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "extern puts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "extern_call puts(%0)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "ret %0") != null);
 }

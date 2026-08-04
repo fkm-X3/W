@@ -52,6 +52,13 @@ pub const CodeGen = struct {
             try self.emitStr("extern malloc\n\n");
         }
 
+        for (self.module.externs.items) |ext| {
+            try self.emit("extern {s}\n", .{self.module.strings.get(ext.name)});
+        }
+        if (self.module.externs.items.len > 0) {
+            try self.emitStr("\n");
+        }
+
         for (self.module.functions.items) |*func| {
             try self.emitFunction(func);
             try self.emitStr("\n");
@@ -473,6 +480,19 @@ pub const CodeGen = struct {
                 if (inst.producesValue()) {
                     const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
                     try self.emit("    mov     [rbp{d}], rax\n", .{r});
+                }
+            },
+
+            .extern_call => {
+                const ext_name = self.module.strings.get(self.module.externs.items[ops[0]].name);
+                const arg_count: u32 = @intCast(ops.len - 1);
+
+                const extra_stack = try self.emitCallSetup(ops, arg_count);
+
+                try self.emit("    call    {s}\n", .{ext_name});
+
+                if (extra_stack > 0) {
+                    try self.emit("    add     rsp, {d}\n", .{extra_stack});
                 }
             },
 
