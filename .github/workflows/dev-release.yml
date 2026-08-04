@@ -55,4 +55,4 @@ jobs:
           gh release create dev \
             --title "dev build (${{ github.sha }})" \
             --notes "Automated development build from commit \`${{ github.sha }}\`. Install or update with: \`ore update\`" \
-            dist/ore-linux-x86_64 dist/ore-windows-x86_64
+            dist/ore-linux-x86_64 dist/ore-windows-x86_64.exe
