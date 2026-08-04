@@ -1,0 +1,8 @@
+# Zig ignore
+.zig-cache/
+zig-out/
+*.o
+
+# Ignore stuff tungsten generated
+*.asm
+*.obj
