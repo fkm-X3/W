@@ -373,7 +373,7 @@ fn cmdUpdate(gpa: Allocator, io: Io, args: []const []const u8) !u8 {
     if (report.latest_sha.len > 0) {
         printOut(io, "commit {s}\n", .{report.latest_sha});
     }
-    printOut(io, "ore now bundles the Wolfram compiler from that commit.\n", .{});
+    printOut(io, "ore now bundles the Wolframite compiler from that commit.\n", .{});
     if (report.staged) {
         printOut(io, "ore will swap itself into place and exit; run `ore` again to use the new version\n", .{});
     } else {
@@ -410,7 +410,7 @@ fn printUpdateHelp(io: Io) void {
         \\Usage:
         \\  ore update [options]
         \\
-        \\Update ore and the Wolfram compiler bundled inside it. Downloads the
+        \\Update ore and the Wolframite compiler bundled inside it. Downloads the
         \\rolling "dev" release (republished by CI on every commit) and swaps
         \\the current executable for the new one.
         \\
