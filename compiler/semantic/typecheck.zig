@@ -205,7 +205,21 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn checkEnumDecl(_: *TypeChecker, _: NodeIdx) !void {}
+    fn checkEnumDecl(self: *TypeChecker, decl_idx: NodeIdx) !void {
+        const decl = self.arena.get(decl_idx);
+        const e = decl.enum_decl;
+        // Type the variant payload types so match arms can bind them.
+        // Generic enums (Option[T]) leave payloads unresolved until
+        // monomorphization lands.
+        if (e.generic_params.indices.len == 0) {
+            for (e.variants.indices) |variant_idx| {
+                const variant = self.arena.get(variant_idx);
+                for (variant.enum_variant.fields.indices) |field_idx| {
+                    _ = self.inferExprType(field_idx);
+                }
+            }
+        }
+    }
 
     fn checkInterfaceDecl(_: *TypeChecker, _: NodeIdx) !void {}
 
@@ -354,26 +368,21 @@ pub const TypeChecker = struct {
                 self.setNodeType(stmt_idx, self.void_ty);
             },
             .for_each => |fe| {
-                _ = self.inferExprType(fe.iterable);
+                const iter_ty = self.inferExprType(fe.iterable);
+                const var_ty = self.forEachElemType(stmt_idx, iter_ty);
                 _ = self.scopes.pushScope(self.scopes.currentScope()) catch @panic("OOM");
                 self.scopes.insert(self.nameSlice(fe.var_name), .{
                     .name = fe.var_name,
                     .kind = .local,
                     .decl_node = stmt_idx,
-                    .type_idx = TypeIdx.none,
+                    .type_idx = var_ty,
                 }) catch @panic("OOM");
                 try self.checkStmt(fe.body);
                 self.scopes.popScope();
                 self.setNodeType(stmt_idx, self.void_ty);
             },
             .match_expr => |m| {
-                _ = self.inferExprType(m.scrutinee);
-                for (m.arms.indices) |arm_idx| {
-                    const arm = self.arena.get(arm_idx);
-                    _ = self.inferExprType(arm.match_arm.pattern);
-                    _ = self.inferExprType(arm.match_arm.body);
-                }
-                self.setNodeType(stmt_idx, self.void_ty);
+                try self.checkMatchStmt(stmt_idx, m);
             },
             .fn_decl => {
                 try self.checkFnDecl(stmt_idx);
@@ -405,6 +414,9 @@ pub const TypeChecker = struct {
             .identifier => |id| {
                 const name = self.nameSlice(id);
                 if (self.builtinTypeName(name)) |ty| return ty;
+                if (ast.findEnumVariant(self.arena, self.source, self.module_node, name)) |vi| {
+                    return self.resolveDeclType(vi.enum_decl);
+                }
                 if (self.scopes.lookup(name, self.scopes.currentScope())) |sym| {
                     if (sym.type_idx != TypeIdx.none) {
                         return sym.type_idx;
@@ -459,9 +471,7 @@ pub const TypeChecker = struct {
                 return self.inferExprType(u.operand);
             },
             .call => |c| {
-                _ = c;
-                // TODO: resolve function signature for proper return type
-                return self.i32_ty;
+                return self.inferCallType(expr_idx, c);
             },
             .field_access => |fa| {
                 const obj_ty = self.inferExprType(fa.object);
@@ -516,12 +526,21 @@ pub const TypeChecker = struct {
                 }
             },
             .index_access => |ia| {
-                _ = self.inferExprType(ia.object);
+                const obj_ty = self.inferExprType(ia.object);
                 _ = self.inferExprType(ia.index);
-                return self.i32_ty;
+                return self.inferElementType(expr_idx, obj_ty);
             },
             .paren_expr => |p| {
                 return self.inferExprType(p);
+            },
+            .impl_type => |inner| {
+                const inner_ty = self.inferExprType(inner);
+                const sem = self.type_pool.get(inner_ty);
+                if (sem != .interface_type) {
+                    self.errorAt(expr_idx, "'impl' requires an interface type, got a non-interface type", .{});
+                    return self.void_ty;
+                }
+                return inner_ty;
             },
             .struct_init => |si| {
                 return self.inferExprType(si.ty);
@@ -534,6 +553,10 @@ pub const TypeChecker = struct {
             .block => |b| {
                 tryStd(self.checkStmt(expr_idx));
                 if (b.stmts.indices.len > 0) {
+                    const last = self.arena.get(b.stmts.indices[b.stmts.indices.len - 1]);
+                    if (last.* == .expr_stmt) {
+                        return self.inferExprType(last.expr_stmt.expr);
+                    }
                     return self.getNodeType(b.stmts.indices[b.stmts.indices.len - 1]);
                 }
                 return self.void_ty;
@@ -556,12 +579,19 @@ pub const TypeChecker = struct {
                 return then_ty;
             },
             .match_expr => |m| {
-                _ = self.inferExprType(m.scrutinee);
+                const scrut_ty = self.inferExprType(m.scrutinee);
                 var result_ty: TypeIdx = self.void_ty;
-                for (m.arms.indices) |arm_idx| {
-                    const arm = self.arena.get(arm_idx);
-                    _ = self.inferExprType(arm.match_arm.pattern);
-                    result_ty = self.inferExprType(arm.match_arm.body);
+                if (self.type_pool.get(scrut_ty) == .enum_type) {
+                    const enum_node = self.type_pool.get(scrut_ty).enum_type;
+                    for (m.arms.indices) |arm_idx| {
+                        result_ty = tryStdTy(self.checkEnumArm(arm_idx, enum_node));
+                    }
+                } else {
+                    for (m.arms.indices) |arm_idx| {
+                        const arm = self.arena.get(arm_idx);
+                        _ = self.inferExprType(arm.match_arm.pattern);
+                        result_ty = self.inferExprType(arm.match_arm.body);
+                    }
                 }
                 return result_ty;
             },
@@ -571,6 +601,280 @@ pub const TypeChecker = struct {
 
     fn inferTypeRef(self: *TypeChecker, expr_idx: NodeIdx) TypeIdx {
         return self.inferExprType(expr_idx);
+    }
+
+    // ========================================================================
+    // Calls
+    // ========================================================================
+
+    /// Type of a call expression. Handles plain function calls, enum variant
+    /// constructors (`Some(x)`), and method calls on structs/classes and
+    /// `*impl Interface` fat pointers.
+    fn inferCallType(self: *TypeChecker, expr_idx: NodeIdx, c: anytype) TypeIdx {
+        for (c.args.indices) |arg| {
+            _ = self.inferExprType(arg);
+        }
+
+        const callee = self.arena.get(c.func);
+        switch (callee.*) {
+            .identifier => |id| {
+                const name = self.nameSlice(id);
+                if (ast.findEnumVariant(self.arena, self.source, self.module_node, name)) |vi| {
+                    self.checkEnumVariantCall(expr_idx, vi, c);
+                    return self.type_pool.add(.{ .enum_type = vi.enum_decl }) catch self.void_ty;
+                }
+                if (self.scopes.lookup(name, self.scopes.currentScope())) |sym| {
+                    if (sym.kind == .function) {
+                        const f = self.arena.get(sym.decl_node).fn_decl;
+                        self.checkCallArgs(expr_idx, f.params, c.args);
+                        if (f.return_type) |ret| return self.inferExprType(ret);
+                        return self.void_ty;
+                    }
+                }
+                return self.i32_ty;
+            },
+            .field_access => |fa| {
+                const obj_ty = self.inferExprType(fa.object);
+                return self.inferMethodReturn(expr_idx, obj_ty, self.nameSlice(fa.field)) orelse self.void_ty;
+            },
+            else => return self.i32_ty,
+        }
+    }
+
+    /// Lightweight arg/param agreement: arg count plus interface satisfaction
+    /// for `*impl Interface` parameters. Deep type matching is left to the
+    /// lowerer's slot-based conventions.
+    fn checkCallArgs(self: *TypeChecker, node_idx: NodeIdx, params: NodeList, args: NodeList) void {
+        if (params.indices.len != args.indices.len) {
+            self.errorAt(node_idx, "call has {d} arguments but the function takes {d}", .{
+                args.indices.len, params.indices.len,
+            });
+        }
+        const count = @min(params.indices.len, args.indices.len);
+        for (0..count) |i| {
+            const param = self.arena.get(params.indices[i]);
+            const arg_ty = self.inferExprType(args.indices[i]);
+            const param_ty = self.inferTypeRef(param.param.ty);
+            if (self.paramWantsInterface(param_ty)) |iface_node| {
+                if (!self.satisfiesInterface(arg_ty, iface_node)) {
+                    self.errorAt(node_idx, "type '{s}' does not satisfy interface '{s}'", .{
+                        self.typeName(arg_ty), self.typeName(self.type_pool.add(.{ .interface_type = iface_node }) catch self.void_ty),
+                    });
+                }
+            }
+        }
+    }
+
+    /// If `ty` is a `*impl I` parameter type, return the interface decl node.
+    fn paramWantsInterface(self: *const TypeChecker, ty: TypeIdx) ?NodeIdx {
+        var sem = self.type_pool.get(ty);
+        if (sem == .pointer) sem = self.type_pool.get(sem.pointer);
+        if (sem == .interface_type) return sem.interface_type;
+        return null;
+    }
+
+    /// Structural satisfaction: every interface method name is present on the
+    /// type (own methods only; the method table has no inheritance yet).
+    fn satisfiesInterface(self: *const TypeChecker, ty: TypeIdx, iface_node: NodeIdx) bool {
+        const sem = self.type_pool.get(ty);
+        const decl_node: NodeIdx = switch (sem) {
+            .struct_type => |n| n,
+            .class_type => |n| n,
+            else => return false,
+        };
+        const iface = self.arena.get(iface_node).interface_decl;
+        const decl = self.arena.get(decl_node);
+        const methods: []const NodeIdx = switch (decl.*) {
+            .struct_decl => |s| s.methods.indices,
+            .class_decl => |c| c.methods.indices,
+            else => return false,
+        };
+        outer: for (iface.methods.indices) |iface_method_idx| {
+            const iface_method = self.arena.get(iface_method_idx);
+            const want = self.nameSlice(iface_method.fn_decl.name);
+            for (methods) |method_idx| {
+                const method = self.arena.get(method_idx);
+                if (method.* == .fn_decl and std.mem.eql(u8, self.nameSlice(method.fn_decl.name), want)) continue :outer;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /// Return type of a method call on a struct/class/interface, or null if
+    /// the callee is not a method.
+    fn inferMethodReturn(self: *TypeChecker, node_idx: NodeIdx, obj_ty: TypeIdx, field: []const u8) ?TypeIdx {
+        var sem = self.type_pool.get(obj_ty);
+        if (sem == .pointer) sem = self.type_pool.get(sem.pointer);
+
+        var iface_node: ?NodeIdx = null;
+        var decl_node: ?NodeIdx = null;
+        switch (sem) {
+            .struct_type => |n| decl_node = n,
+            .class_type => |n| decl_node = n,
+            .interface_type => |n| iface_node = n,
+            else => return null,
+        }
+
+        if (iface_node) |inode| {
+            const iface = self.arena.get(inode).interface_decl;
+            for (iface.methods.indices) |method_idx| {
+                const method = self.arena.get(method_idx);
+                if (method.* != .fn_decl) continue;
+                if (std.mem.eql(u8, self.nameSlice(method.fn_decl.name), field)) {
+                    if (method.fn_decl.return_type) |ret| return self.inferExprType(ret);
+                    return self.void_ty;
+                }
+            }
+            self.errorAt(node_idx, "interface has no method '{s}'", .{field});
+            return null;
+        }
+
+        if (decl_node) |dnode| {
+            const decl = self.arena.get(dnode);
+            const methods: []const NodeIdx = switch (decl.*) {
+                .struct_decl => |s| s.methods.indices,
+                .class_decl => |c| c.methods.indices,
+                else => &.{},
+            };
+            for (methods) |method_idx| {
+                const method = self.arena.get(method_idx);
+                if (method.* != .fn_decl) continue;
+                if (std.mem.eql(u8, self.nameSlice(method.fn_decl.name), field)) {
+                    if (method.fn_decl.return_type) |ret| return self.inferExprType(ret);
+                    return self.void_ty;
+                }
+            }
+            self.errorAt(node_idx, "type has no method '{s}'", .{field});
+            return null;
+        }
+
+        return null;
+    }
+
+    // ========================================================================
+    // Enums and match
+    // ========================================================================
+
+    fn checkEnumVariantCall(self: *TypeChecker, node_idx: NodeIdx, vi: ast.EnumVariantInfo, c: anytype) void {
+        const variant = self.arena.get(vi.variant_node);
+        const field_count = variant.enum_variant.fields.indices.len;
+        if (c.args.indices.len != field_count) {
+            self.errorAt(node_idx, "variant '{s}' takes {d} arguments, got {d}", .{
+                self.nameSlice(variant.enum_variant.name), field_count, c.args.indices.len,
+            });
+        }
+        for (c.args.indices) |arg| {
+            _ = self.inferExprType(arg);
+        }
+    }
+
+    fn checkMatchStmt(self: *TypeChecker, stmt_idx: NodeIdx, m: anytype) anyerror!void {
+        const scrut_ty = self.inferExprType(m.scrutinee);
+        if (self.type_pool.get(scrut_ty) == .enum_type) {
+            const enum_node = self.type_pool.get(scrut_ty).enum_type;
+            for (m.arms.indices) |arm_idx| {
+                _ = try self.checkEnumArm(arm_idx, enum_node);
+            }
+        } else {
+            for (m.arms.indices) |arm_idx| {
+                const arm = self.arena.get(arm_idx);
+                _ = self.inferExprType(arm.match_arm.pattern);
+                _ = self.inferExprType(arm.match_arm.body);
+            }
+        }
+        self.setNodeType(stmt_idx, self.void_ty);
+    }
+
+    /// Check one enum match arm: verify the pattern names a variant of
+    /// `enum_node`, bind its payload identifiers in an arm-local scope, and
+    /// type the body. Returns the body's type (for expression-position
+    /// matches).
+    fn checkEnumArm(self: *TypeChecker, arm_idx: NodeIdx, enum_node: NodeIdx) anyerror!TypeIdx {
+        const arm = self.arena.get(arm_idx);
+        const pattern = self.arena.get(arm.match_arm.pattern);
+        const variant = self.enumVariantFor(enum_node, pattern) orelse {
+            self.errorAt(arm_idx, "match arm pattern must be a variant of this enum", .{});
+            _ = self.inferExprType(arm.match_arm.pattern);
+            return self.inferExprType(arm.match_arm.body);
+        };
+
+        _ = try self.scopes.pushScope(self.scopes.currentScope());
+        const variant_node = self.arena.get(variant.variant_node);
+        if (pattern.* == .call) {
+            for (pattern.call.args.indices, 0..) |arg_idx, i| {
+                if (i >= variant_node.enum_variant.fields.indices.len) break;
+                const arg = self.arena.get(arg_idx);
+                if (arg.* != .identifier) continue;
+                const field_ty = self.inferExprType(variant_node.enum_variant.fields.indices[i]);
+                self.scopes.insert(self.nameSlice(arg.identifier), .{
+                    .name = arg.identifier,
+                    .kind = .local,
+                    .decl_node = arg_idx,
+                    .type_idx = field_ty,
+                }) catch @panic("OOM");
+            }
+        }
+        _ = self.inferExprType(arm.match_arm.pattern);
+        const body_ty = self.inferExprType(arm.match_arm.body);
+        self.scopes.popScope();
+        return body_ty;
+    }
+
+    /// Match a pattern node against the variants of `enum_node`.
+    fn enumVariantFor(self: *TypeChecker, enum_node: NodeIdx, pattern: *const Node) ?ast.EnumVariantInfo {
+        const name: []const u8 = switch (pattern.*) {
+            .identifier => |id| self.nameSlice(id),
+            .call => |c| blk: {
+                const callee = self.arena.get(c.func);
+                if (callee.* != .identifier) return null;
+                break :blk self.nameSlice(callee.identifier);
+            },
+            else => return null,
+        };
+        const vi = ast.findEnumVariant(self.arena, self.source, self.module_node, name) orelse return null;
+        if (vi.enum_decl != enum_node) return null;
+        return vi;
+    }
+
+    // ========================================================================
+    // Indexing and iteration
+    // ========================================================================
+
+    /// Element type produced by `obj[index]`.
+    fn inferElementType(self: *TypeChecker, node_idx: NodeIdx, obj_ty: TypeIdx) TypeIdx {
+        var sem = self.type_pool.get(obj_ty);
+        if (sem == .pointer) sem = self.type_pool.get(sem.pointer);
+        return switch (sem) {
+            .string_type => self.i32_ty,
+            .array => |a| a.elem,
+            .slice => |e| e,
+            // A type name used as a generic application (`Option[i32]`) is
+            // not real indexing: the application denotes the type itself.
+            // Unresolved identifiers (e.g. `Slice[T]` inside a generic fn)
+            // fall back to i32 until monomorphization lands.
+            .struct_type, .class_type, .enum_type, .interface_type => obj_ty,
+            .void, .inferred => self.i32_ty,
+            else => blk: {
+                self.errorAt(node_idx, "cannot index a value of type '{s}'", .{self.typeName(obj_ty)});
+                break :blk self.void_ty;
+            },
+        };
+    }
+
+    /// Element type of a `for ... in` iterable, or void if not iterable.
+    fn forEachElemType(self: *TypeChecker, node_idx: NodeIdx, iter_ty: TypeIdx) TypeIdx {
+        var sem = self.type_pool.get(iter_ty);
+        if (sem == .pointer) sem = self.type_pool.get(sem.pointer);
+        return switch (sem) {
+            .string_type => self.i32_ty,
+            .array => |a| a.elem,
+            .slice => |e| e,
+            else => blk: {
+                self.errorAt(node_idx, "'for ... in' requires a String, array or slice", .{});
+                break :blk self.void_ty;
+            },
+        };
     }
 
     fn structFieldType(self: *TypeChecker, decl_node: NodeIdx, field_name: []const u8) ?TypeIdx {
@@ -714,6 +1018,10 @@ pub const TypeChecker = struct {
 
 fn tryStd(what: anyerror!void) void {
     what catch @panic("OOM");
+}
+
+fn tryStdTy(what: anyerror!TypeIdx) TypeIdx {
+    return what catch @panic("OOM");
 }
 
 fn runCheck(allocator: Allocator, source: []const u8) !struct { arena: AstArena, type_pool: TypePool, diagnostics: diag.Diagnostics } {

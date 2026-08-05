@@ -80,6 +80,8 @@ pub const Node = union(enum) {
     paren_expr: NodeIdx,
     struct_init: struct { ty: NodeIdx, fields: NodeList },
     range_expr: struct { start: NodeIdx, end: NodeIdx },
+    /// `impl Interface` type expression (`*impl Interface` = pointer to it).
+    impl_type: NodeIdx,
 
     // Statements
     let_stmt: struct { mutable: bool, name: StringRef, ty: ?NodeIdx, init_expr: ?NodeIdx },
@@ -189,3 +191,32 @@ pub const AstArena = struct {
         return .{ .indices = copy };
     }
 };
+
+/// Location of a named enum variant within its module.
+pub const EnumVariantInfo = struct {
+    enum_decl: NodeIdx,
+    variant_node: NodeIdx,
+    index: u32,
+};
+
+/// Scan the module's top-level declarations for the enum declaring a variant
+/// named `name`. O(module decls * variants) per lookup — fine for module
+/// scale; a registry can replace this when imports land.
+pub fn findEnumVariant(arena: *const AstArena, source: []const u8, module_node: NodeIdx, name: []const u8) ?EnumVariantInfo {
+    const mod = arena.get(module_node);
+    for (mod.module.decls.indices) |decl_idx| {
+        const decl = arena.get(decl_idx);
+        if (decl.* != .enum_decl) continue;
+        for (decl.enum_decl.variants.indices, 0..) |variant_idx, i| {
+            const variant = arena.get(variant_idx);
+            if (std.mem.eql(u8, variant.enum_variant.name.slice(source), name)) {
+                return .{
+                    .enum_decl = decl_idx,
+                    .variant_node = variant_idx,
+                    .index = @intCast(i),
+                };
+            }
+        }
+    }
+    return null;
+}

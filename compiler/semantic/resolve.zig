@@ -373,11 +373,7 @@ pub const Resolver = struct {
             },
             .match_expr => |m| {
                 try self.resolveExpr(m.scrutinee);
-                for (m.arms.indices) |arm_idx| {
-                    const arm = self.arena.get(arm_idx);
-                    try self.resolveExpr(arm.match_arm.pattern);
-                    try self.resolveExpr(arm.match_arm.body);
-                }
+                try self.resolveMatchArms(m);
             },
             .fn_decl => {
                 try self.resolveFnDecl(stmt_idx);
@@ -388,12 +384,53 @@ pub const Resolver = struct {
         }
     }
 
+    /// Resolve each match arm. When the pattern is an enum variant call
+    /// (`Some(x)`), the payload identifiers are bound in a scope that covers
+    /// the arm body only.
+    fn resolveMatchArms(self: *Resolver, m: anytype) anyerror!void {
+        for (m.arms.indices) |arm_idx| {
+            const arm = self.arena.get(arm_idx);
+            const pattern = self.arena.get(arm.match_arm.pattern);
+            var variant_info: ?ast.EnumVariantInfo = null;
+            if (pattern.* == .call) {
+                const callee = self.arena.get(pattern.call.func);
+                if (callee.* == .identifier) {
+                    variant_info = ast.findEnumVariant(self.arena, self.source, self.module_node, self.nameSlice(callee.identifier));
+                }
+            }
+            if (variant_info) |vi| {
+                _ = try self.scopes.pushScope(self.scopes.currentScope());
+                const variant = self.arena.get(vi.variant_node);
+                for (pattern.call.args.indices, 0..) |arg_idx, i| {
+                    const arg = self.arena.get(arg_idx);
+                    if (i < variant.enum_variant.fields.indices.len and arg.* == .identifier) {
+                        try self.scopes.insert(self.nameSlice(arg.identifier), .{
+                            .name = arg.identifier,
+                            .kind = .local,
+                            .decl_node = arg_idx,
+                            .type_idx = TypeIdx.none,
+                        });
+                    }
+                }
+                for (pattern.call.args.indices) |arg_idx| {
+                    try self.resolveExpr(arg_idx);
+                }
+                try self.resolveExpr(arm.match_arm.body);
+                self.scopes.popScope();
+            } else {
+                try self.resolveExpr(arm.match_arm.pattern);
+                try self.resolveExpr(arm.match_arm.body);
+            }
+        }
+    }
+
     fn resolveExpr(self: *Resolver, expr_idx: NodeIdx) anyerror!void {
         const expr = self.arena.get(expr_idx);
         switch (expr.*) {
             .identifier => |id| {
                 const name = self.nameSlice(id);
                 if (isBuiltinTypeName(name)) return;
+                if (ast.findEnumVariant(self.arena, self.source, self.module_node, name) != null) return;
                 if (self.scopes.lookup(name, self.scopes.currentScope())) |_| {
                 } else {
                     self.errorAt(expr_idx, "undefined identifier '{s}'", .{name});
@@ -407,11 +444,20 @@ pub const Resolver = struct {
                 try self.resolveExpr(u.operand);
             },
             .call => |c| {
-                try self.resolveExpr(c.func);
+                const callee = self.arena.get(c.func);
+                if (callee.* == .identifier and
+                    ast.findEnumVariant(self.arena, self.source, self.module_node, self.nameSlice(callee.identifier)) != null)
+                {
+                    // Enum variant constructor: the name resolves inside the
+                    // enum's own scope, not the current one.
+                } else {
+                    try self.resolveExpr(c.func);
+                }
                 for (c.args.indices) |arg| {
                     try self.resolveExpr(arg);
                 }
             },
+            .impl_type => |inner| try self.resolveExpr(inner),
             .field_access => |fa| {
                 try self.resolveExpr(fa.object);
             },
@@ -450,11 +496,7 @@ pub const Resolver = struct {
             },
             .match_expr => |m| {
                 try self.resolveExpr(m.scrutinee);
-                for (m.arms.indices) |arm_idx| {
-                    const arm = self.arena.get(arm_idx);
-                    try self.resolveExpr(arm.match_arm.pattern);
-                    try self.resolveExpr(arm.match_arm.body);
-                }
+                try self.resolveMatchArms(m);
             },
             .param, .field, .enum_variant, .match_arm, .struct_init_field => {},
             .module, .fn_decl, .struct_decl, .class_decl, .enum_decl, .interface_decl, .impl_block, .prop_decl, .import_decl => {},

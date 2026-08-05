@@ -1036,6 +1036,11 @@ pub const Parser = struct {
                 _ = self.advance();
                 return self.parseExpr(Precedence.prefix.toInt());
             },
+            .impl_kw => {
+                _ = self.advance();
+                const inner = self.parseExpr(Precedence.prefix.toInt()) orelse return null;
+                return self.appendNode(.{ .impl_type = inner });
+            },
             else => {
                 self.errorTok(tok, "unexpected token in expression: '{s}'", .{tok.tag.lexeme()});
                 return null;

@@ -38,6 +38,12 @@ const TypePool = types_mod.TypePool;
 const TypeIdx = types_mod.TypeIdx;
 const SemType = types_mod.SemType;
 
+/// Key for the synthetic per-(type, interface) vtable cache.
+const IfaceVtableKey = struct {
+    ty: NodeIdx,
+    iface: NodeIdx,
+};
+
 /// One method of a struct/class, plus its already-computed IR return type.
 pub const MethodEntry = struct {
     fidx: api.FunctionIdx,
@@ -92,6 +98,8 @@ pub const Lowerer = struct {
     methods: std.AutoHashMapUnmanaged(NodeIdx, MethodTable),
     /// class decl node -> vtable global.
     vtable_by_class: std.AutoHashMapUnmanaged(NodeIdx, api.GlobalIdx),
+    /// (type decl, interface decl) -> synthetic vtable in interface method order.
+    iface_vtables: std.AutoHashMapUnmanaged(IfaceVtableKey, api.GlobalIdx),
     /// (fn_decl node, FunctionIdx) pairs in creation order, for body lowering.
     all_functions: std.ArrayListUnmanaged(struct { node: NodeIdx, idx: api.FunctionIdx }),
 
@@ -140,6 +148,7 @@ pub const Lowerer = struct {
             .fn_by_node = .empty,
             .methods = .empty,
             .vtable_by_class = .empty,
+            .iface_vtables = .empty,
             .all_functions = .empty,
             .params = .empty,
             .locals = .empty,
@@ -159,6 +168,7 @@ pub const Lowerer = struct {
         self.methods.deinit(self.gpa);
         self.fn_by_node.deinit(self.gpa);
         self.vtable_by_class.deinit(self.gpa);
+        self.iface_vtables.deinit(self.gpa);
         self.all_functions.deinit(self.gpa);
         self.params.deinit(self.gpa);
         self.locals.deinit(self.gpa);
@@ -317,9 +327,7 @@ pub const Lowerer = struct {
             .if_expr => try self.lowerIf(node_idx),
             .while_expr => try self.lowerWhile(node_idx),
             .for_range => try self.lowerForRange(node_idx),
-            .for_each => {
-                self.codegenError(node_idx, "'for ... in' iteration is not lowered yet", .{});
-            },
+            .for_each => |fe| try self.lowerForEach(node_idx, fe),
             .match_expr => try self.lowerMatch(node_idx),
             .fn_decl => {},
             else => _ = try self.lowerExpr(node_idx),
@@ -440,6 +448,52 @@ pub const Lowerer = struct {
         self.setBlock(merge);
     }
 
+    /// Lower an `if` in expression position: branches contribute values to a
+    /// phi at the merge block. Branches that terminate (return) do not
+    /// contribute an incoming edge. Void-typed ifs fall back to statement
+    /// lowering.
+    fn lowerIfExpr(self: *Lowerer, node_idx: NodeIdx, i: anytype) !api.Value {
+        if (self.type_pool.get(self.exprType(node_idx)) == .void) {
+            try self.lowerIf(node_idx);
+            return self.ctx.buildIntConst(self.i64_ty, 0);
+        }
+
+        const cond = try self.lowerExpr(i.cond);
+        const then_b = try self.ctx.appendBlock();
+        const else_b = try self.ctx.appendBlock();
+        const merge = try self.ctx.appendBlock();
+        _ = try self.ctx.buildCondBr(cond, then_b, else_b);
+
+        self.setBlock(then_b);
+        const then_val = try self.lowerBranchValue(i.then_body);
+        const then_has = !self.block_terminated;
+        if (then_has) _ = try self.ctx.buildBr(merge);
+
+        self.setBlock(else_b);
+        const else_val = if (i.else_body) |else_idx|
+            try self.lowerBranchValue(else_idx)
+        else
+            try self.ctx.buildIntConst(self.i64_ty, 0);
+        const else_has = !self.block_terminated;
+        if (else_has) _ = try self.ctx.buildBr(merge);
+
+        self.setBlock(merge);
+        var incoming = std.ArrayList(api.PhiIncoming).empty;
+        defer incoming.deinit(self.gpa);
+        if (then_has) try incoming.append(self.gpa, .{ .value = then_val, .block = then_b });
+        if (else_has) try incoming.append(self.gpa, .{ .value = else_val, .block = else_b });
+        if (incoming.items.len == 0) return self.ctx.buildIntConst(self.i64_ty, 0);
+        return self.ctx.buildPhi(self.irTypeFor(self.exprType(node_idx)), incoming.items);
+    }
+
+    /// Evaluate a branch body in expression position: blocks yield their last
+    /// expression, other nodes lower as expressions.
+    fn lowerBranchValue(self: *Lowerer, node_idx: NodeIdx) !api.Value {
+        const node = self.arena.get(node_idx);
+        if (node.* == .block) return self.lowerBlockValue(node.block);
+        return self.lowerExpr(node_idx);
+    }
+
     fn lowerWhile(self: *Lowerer, node_idx: NodeIdx) !void {
         const w = self.arena.get(node_idx).while_expr;
         const header = try self.ctx.appendBlock();
@@ -492,10 +546,108 @@ pub const Lowerer = struct {
         try self.popLocalScope(self.shadows.items.len - if (self.locals.get(self.nameSlice(fr.var_name)) != null) @as(usize, 1) else 0);
     }
 
+    /// `for x in iterable` — currently lowers to String iteration: walk the
+    /// `[len][data]` block and expose each byte as an i32 char.
+    fn lowerForEach(self: *Lowerer, node_idx: NodeIdx, fe: anytype) !void {
+        const iterable = try self.lowerExpr(fe.iterable);
+        const sem = self.type_pool.get(self.exprType(fe.iterable));
+        switch (sem) {
+            .string_type => try self.lowerForEachString(fe, iterable),
+            else => self.codegenError(node_idx, "only String iteration is lowered for 'for ... in'", .{}),
+        }
+    }
+
+    fn lowerForEachString(self: *Lowerer, fe: anytype, iterable: api.Value) !void {
+        const len_addr = try self.ctx.buildPtrAdd(self.ptr_ty, iterable, try self.ctx.buildIntConst(self.i64_ty, @intCast(string_mod.len_offset)));
+        const len = try self.ctx.buildLoad(self.i64_ty, len_addr);
+        const data_addr = try self.ctx.buildPtrAdd(self.ptr_ty, iterable, try self.ctx.buildIntConst(self.i64_ty, @intCast(string_mod.data_offset)));
+        const data = try self.ctx.buildLoad(self.ptr_ty, data_addr);
+
+        const var_slot = try self.ctx.buildAllocaBytes(self.ptr_ty, 8);
+        const i_slot = try self.ctx.buildAllocaBytes(self.ptr_ty, 8);
+        _ = try self.ctx.buildStore(self.i64_ty, i_slot, try self.ctx.buildIntConst(self.i64_ty, 0));
+
+        const header = try self.ctx.appendBlock();
+        const body = try self.ctx.appendBlock();
+        const incr = try self.ctx.appendBlock();
+        const exit = try self.ctx.appendBlock();
+        _ = try self.ctx.buildBr(header);
+
+        self.setBlock(header);
+        const i = try self.ctx.buildLoad(self.i64_ty, i_slot);
+        const cond = try self.ctx.buildIcmp(.icmp_ult, self.bool_ty, i, len);
+        _ = try self.ctx.buildCondBr(cond, body, exit);
+
+        self.setBlock(body);
+        const cur_i = try self.ctx.buildLoad(self.i64_ty, i_slot);
+        const elem_ptr = try self.ctx.buildPtrAdd(self.ptr_ty, data, cur_i);
+        const ch = try self.ctx.buildLoad(self.i32_ty, elem_ptr);
+        _ = try self.ctx.buildStore(self.i64_ty, var_slot, ch);
+        try self.bindLocal(self.nameSlice(fe.var_name), var_slot, self.checker.i32_ty);
+        try self.lowerStmt(fe.body);
+        if (!self.block_terminated) {
+            _ = try self.ctx.buildBr(incr);
+
+            self.setBlock(incr);
+            const next = try self.ctx.buildAdd(self.i64_ty, try self.ctx.buildLoad(self.i64_ty, i_slot), try self.ctx.buildIntConst(self.i64_ty, 1));
+            _ = try self.ctx.buildStore(self.i64_ty, i_slot, next);
+            _ = try self.ctx.buildBr(header);
+        }
+        self.setBlock(exit);
+        try self.popLocalScope(self.shadows.items.len - if (self.locals.get(self.nameSlice(fe.var_name)) != null) @as(usize, 1) else 0);
+    }
+
+    /// `obj[index]` — Strings index by byte (char), arrays by element slot.
+    fn lowerIndexAccess(self: *Lowerer, node_idx: NodeIdx, ia: anytype) !api.Value {
+        const obj = try self.lowerExpr(ia.object);
+        const index = try self.lowerExpr(ia.index);
+        var sem = self.type_pool.get(self.exprType(ia.object));
+        if (sem == .pointer) sem = self.type_pool.get(sem.pointer);
+        switch (sem) {
+            .string_type => {
+                const data_addr = try self.ctx.buildPtrAdd(self.ptr_ty, obj, try self.ctx.buildIntConst(self.i64_ty, @intCast(string_mod.data_offset)));
+                const data = try self.ctx.buildLoad(self.ptr_ty, data_addr);
+                const elem_ptr = try self.ctx.buildPtrAdd(self.ptr_ty, data, index);
+                return self.ctx.buildLoad(self.i32_ty, elem_ptr);
+            },
+            .array => {
+                const elem_ptr = try self.ctx.buildPtrAdd(self.ptr_ty, obj, try self.ctx.buildMul(self.i64_ty, index, try self.ctx.buildIntConst(self.i64_ty, 8)));
+                return self.ctx.buildLoad(self.i64_ty, elem_ptr);
+            },
+            else => {
+                self.codegenError(node_idx, "index access is only lowered for String and array values", .{});
+                return self.ctx.buildIntConst(self.i64_ty, 0);
+            },
+        }
+    }
+
     fn lowerMatch(self: *Lowerer, node_idx: NodeIdx) !void {
         const m = self.arena.get(node_idx).match_expr;
         const scrutinee = try self.lowerExpr(m.scrutinee);
+        if (self.type_pool.get(self.exprType(m.scrutinee)) == .enum_type) {
+            _ = try self.lowerMatchEnum(node_idx, m, scrutinee, false);
+        } else {
+            _ = try self.lowerMatchInt(node_idx, m, scrutinee, false);
+        }
+    }
 
+    /// Lower a match in expression position (value-producing arms).
+    fn lowerMatchExpr(self: *Lowerer, node_idx: NodeIdx) !api.Value {
+        if (self.type_pool.get(self.exprType(node_idx)) == .void) {
+            try self.lowerMatch(node_idx);
+            return self.ctx.buildIntConst(self.i64_ty, 0);
+        }
+        const m = self.arena.get(node_idx).match_expr;
+        const scrutinee = try self.lowerExpr(m.scrutinee);
+        if (self.type_pool.get(self.exprType(m.scrutinee)) == .enum_type) {
+            return self.lowerMatchEnum(node_idx, m, scrutinee, true);
+        }
+        return self.lowerMatchInt(node_idx, m, scrutinee, true);
+    }
+
+    /// Integer-literal match: icmp chain to per-arm blocks, phi at merge when
+    /// the match is in expression position.
+    fn lowerMatchInt(self: *Lowerer, node_idx: NodeIdx, m: anytype, scrutinee: api.Value, want_value: bool) !api.Value {
         var arm_consts = std.ArrayList(api.Value).empty;
         defer arm_consts.deinit(self.gpa);
         for (m.arms.indices) |arm_idx| {
@@ -504,7 +656,7 @@ pub const Lowerer = struct {
             const value = switch (pattern.*) {
                 .int_literal => |v| try self.ctx.buildIntConst(self.i64_ty, v),
                 else => blk: {
-                    self.codegenError(arm_idx, "only integer match patterns are lowered", .{});
+                    self.codegenError(arm_idx, "only integer match patterns are supported for non-enum scrutinees", .{});
                     break :blk try self.ctx.buildIntConst(self.i64_ty, 0);
                 },
             };
@@ -515,9 +667,14 @@ pub const Lowerer = struct {
         defer checks.deinit(self.gpa);
         var bodies = std.ArrayList(api.BasicBlockIdx).empty;
         defer bodies.deinit(self.gpa);
+        var body_vals = std.ArrayList(api.Value).empty;
+        defer body_vals.deinit(self.gpa);
+        var terminated_flags = std.ArrayList(bool).empty;
+        defer terminated_flags.deinit(self.gpa);
         for (m.arms.indices) |_| {
             try checks.append(self.gpa, try self.ctx.appendBlock());
             try bodies.append(self.gpa, try self.ctx.appendBlock());
+            try terminated_flags.append(self.gpa, false);
         }
         const merge = try self.ctx.appendBlock();
         _ = try self.ctx.buildBr(checks.items[0]);
@@ -530,11 +687,134 @@ pub const Lowerer = struct {
 
             self.setBlock(bodies.items[i]);
             const arm = self.arena.get(arm_idx);
-            try self.lowerStmt(arm.match_arm.body);
+            if (want_value) {
+                try body_vals.append(self.gpa, try self.lowerExpr(arm.match_arm.body));
+            } else {
+                try self.lowerStmt(arm.match_arm.body);
+            }
+            terminated_flags.items[i] = self.block_terminated;
             if (!self.block_terminated) _ = try self.ctx.buildBr(merge);
         }
 
         self.setBlock(merge);
+        if (!want_value) return self.ctx.buildIntConst(self.i64_ty, 0);
+        var incoming = std.ArrayList(api.PhiIncoming).empty;
+        defer incoming.deinit(self.gpa);
+        for (m.arms.indices, 0..) |_, i| {
+            if (!terminated_flags.items[i]) {
+                try incoming.append(self.gpa, .{ .value = body_vals.items[i], .block = bodies.items[i] });
+            }
+        }
+        if (incoming.items.len == 0) return self.ctx.buildIntConst(self.i64_ty, 0);
+        return self.ctx.buildPhi(self.irTypeFor(self.exprType(node_idx)), incoming.items);
+    }
+
+    /// Enum match: compare the tag byte, then bind the matched variant's
+    /// payload identifiers for the arm body. Returns an expression value when
+    /// the match is in expression position.
+    fn lowerMatchEnum(self: *Lowerer, node_idx: NodeIdx, m: anytype, scrutinee: api.Value, want_value: bool) !api.Value {
+        const tag = try self.ctx.buildLoad(self.i64_ty, scrutinee);
+
+        var checks = std.ArrayList(api.BasicBlockIdx).empty;
+        defer checks.deinit(self.gpa);
+        var bodies = std.ArrayList(api.BasicBlockIdx).empty;
+        defer bodies.deinit(self.gpa);
+        var body_vals = std.ArrayList(api.Value).empty;
+        defer body_vals.deinit(self.gpa);
+        var terminated_flags = std.ArrayList(bool).empty;
+        defer terminated_flags.deinit(self.gpa);
+        for (m.arms.indices) |_| {
+            try checks.append(self.gpa, try self.ctx.appendBlock());
+            try bodies.append(self.gpa, try self.ctx.appendBlock());
+            try terminated_flags.append(self.gpa, false);
+        }
+        const merge = try self.ctx.appendBlock();
+        _ = try self.ctx.buildBr(checks.items[0]);
+
+        for (m.arms.indices, 0..) |arm_idx, i| {
+            const arm = self.arena.get(arm_idx);
+            const pattern = self.arena.get(arm.match_arm.pattern);
+            const variant = self.matchVariantFor(arm_idx, pattern) orelse {
+                self.setBlock(checks.items[i]);
+                const next_check = if (i + 1 < checks.items.len) checks.items[i + 1] else merge;
+                _ = try self.ctx.buildCondBr(tag, bodies.items[i], next_check);
+                self.setBlock(bodies.items[i]);
+                _ = try self.ctx.buildBr(merge);
+                terminated_flags.items[i] = false;
+                if (want_value) try body_vals.append(self.gpa, try self.ctx.buildIntConst(self.i64_ty, 0));
+                continue;
+            };
+
+            self.setBlock(checks.items[i]);
+            const tag_const = try self.ctx.buildIntConst(self.i64_ty, @intCast(variant.index));
+            const match_cond = try self.ctx.buildIcmp(.icmp_eq, self.bool_ty, tag, tag_const);
+            const next_check = if (i + 1 < checks.items.len) checks.items[i + 1] else merge;
+            _ = try self.ctx.buildCondBr(match_cond, bodies.items[i], next_check);
+
+            self.setBlock(bodies.items[i]);
+            const local_marker = self.shadows.items.len;
+            const variant_node = self.arena.get(variant.variant_node);
+            if (pattern.* == .call) {
+                for (pattern.call.args.indices, 0..) |arg_idx, j| {
+                    const arg = self.arena.get(arg_idx);
+                    if (arg.* != .identifier) continue;
+                    const payload_addr = try self.ctx.buildPtrAdd(self.ptr_ty, scrutinee, try self.ctx.buildIntConst(self.i64_ty, @intCast(class_mod.enumPayloadOffset(j))));
+                    const payload = try self.ctx.buildLoad(self.i64_ty, payload_addr);
+                    const slot = try self.ctx.buildAllocaBytes(self.ptr_ty, 8);
+                    _ = try self.ctx.buildStore(self.i64_ty, slot, payload);
+                    const payload_ty = if (j < variant_node.enum_variant.fields.indices.len)
+                        self.checker.nodeType(variant_node.enum_variant.fields.indices[j])
+                    else
+                        self.checker.void_ty;
+                    try self.bindLocal(self.nameSlice(arg.identifier), slot, payload_ty);
+                }
+            }
+            if (want_value) {
+                try body_vals.append(self.gpa, try self.lowerExpr(arm.match_arm.body));
+            } else {
+                try self.lowerStmt(arm.match_arm.body);
+            }
+            terminated_flags.items[i] = self.block_terminated;
+            if (!self.block_terminated) _ = try self.ctx.buildBr(merge);
+            try self.popLocalScope(local_marker);
+        }
+
+        self.setBlock(merge);
+        if (!want_value) return self.ctx.buildIntConst(self.i64_ty, 0);
+        var incoming = std.ArrayList(api.PhiIncoming).empty;
+        defer incoming.deinit(self.gpa);
+        for (m.arms.indices, 0..) |_, i| {
+            if (!terminated_flags.items[i]) {
+                try incoming.append(self.gpa, .{ .value = body_vals.items[i], .block = bodies.items[i] });
+            }
+        }
+        if (incoming.items.len == 0) return self.ctx.buildIntConst(self.i64_ty, 0);
+        return self.ctx.buildPhi(self.irTypeFor(self.exprType(node_idx)), incoming.items);
+    }
+
+    /// Resolve a match arm pattern to an enum variant (either a bare variant
+    /// name or a `Variant(...)` call), reporting an error when neither fits.
+    fn matchVariantFor(self: *Lowerer, arm_idx: NodeIdx, pattern: *const Node) ?ast.EnumVariantInfo {
+        const name: []const u8 = switch (pattern.*) {
+            .identifier => |id| self.nameSlice(id),
+            .call => |c| blk: {
+                const callee = self.arena.get(c.func);
+                if (callee.* != .identifier) {
+                    self.codegenError(arm_idx, "unsupported match pattern", .{});
+                    return null;
+                }
+                break :blk self.nameSlice(callee.identifier);
+            },
+            else => {
+                self.codegenError(arm_idx, "match arm pattern must be an enum variant", .{});
+                return null;
+            },
+        };
+        const vi = ast.findEnumVariant(self.arena, self.source, self.checker.module_node, name) orelse {
+            self.codegenError(arm_idx, "'{s}' is not an enum variant", .{name});
+            return null;
+        };
+        return vi;
     }
 
     // ========================================================================
@@ -550,7 +830,13 @@ pub const Lowerer = struct {
             .null_literal => return self.ctx.buildIntConst(self.i64_ty, 0),
             .char_literal => |ref| return self.lowerChar(ref),
             .string_literal => |ref| return self.lowerString(ref),
-            .identifier => |id| return self.lowerIdentifier(node_idx, id),
+            .identifier => |id| {
+                const name = self.nameSlice(id);
+                if (ast.findEnumVariant(self.arena, self.source, self.checker.module_node, name)) |vi| {
+                    return self.lowerVariantInit(vi, .{ .args = NodeList{ .indices = &.{} } });
+                }
+                return self.lowerIdentifier(node_idx, id);
+            },
             .binary_op => |b| return self.lowerBinary(node_idx, b),
             .unary_op => |u| return self.lowerUnary(node_idx, u),
             .call => |c| return self.lowerCall(node_idx, c),
@@ -560,18 +846,17 @@ pub const Lowerer = struct {
                 }
                 return self.ctx.buildIntConst(self.i64_ty, 0);
             },
-            .index_access => {
-                self.codegenError(node_idx, "index access is not lowered yet", .{});
-                return self.ctx.buildIntConst(self.i64_ty, 0);
-            },
+            .index_access => |ia| return self.lowerIndexAccess(node_idx, ia),
             .paren_expr => |p| return self.lowerExpr(p),
             .struct_init => |si| return self.lowerStructInit(node_idx, si),
             .range_expr => {
                 self.codegenError(node_idx, "range expression outside of a for loop", .{});
                 return self.ctx.buildIntConst(self.i64_ty, 0);
             },
-            .if_expr, .match_expr, .while_expr, .for_range, .for_each => {
-                self.codegenError(node_idx, "control flow in expression position is not supported yet", .{});
+            .if_expr => |i| return self.lowerIfExpr(node_idx, i),
+            .match_expr => return self.lowerMatchExpr(node_idx),
+            .while_expr, .for_range, .for_each => {
+                self.codegenError(node_idx, "loops in expression position are not supported", .{});
                 return self.ctx.buildIntConst(self.i64_ty, 0);
             },
             .block => |b| return self.lowerBlockValue(b),
@@ -806,6 +1091,9 @@ pub const Lowerer = struct {
         switch (callee.*) {
             .identifier => |id| {
                 const name = self.nameSlice(id);
+                if (ast.findEnumVariant(self.arena, self.source, self.checker.module_node, name)) |vi| {
+                    return self.lowerVariantInit(vi, c);
+                }
                 const sym = self.checker.scopes.scopes.items[0].symbols.get(name) orelse {
                     self.codegenError(node_idx, "unknown function '{s}'", .{name});
                     return self.ctx.buildIntConst(self.i64_ty, 0);
@@ -821,11 +1109,19 @@ pub const Lowerer = struct {
                 const ret_ir = self.irTypeFor(self.checker.nodeType(sym.decl_node));
                 var args = try self.lowerArgs(c.args);
                 defer args.deinit(self.gpa);
+                try self.coerceInterfaceArgs(node_idx, sym.decl_node, c.args, &args);
                 return self.ctx.buildCall(fidx, ret_ir, args.items);
             },
             .field_access => |fa| {
+                const obj_ty = self.exprType(fa.object);
+                const obj_sem = self.type_pool.get(obj_ty);
+                var eff_sem = obj_sem;
+                if (eff_sem == .pointer) eff_sem = self.type_pool.get(eff_sem.pointer);
+                if (eff_sem == .interface_type) {
+                    return self.lowerIfaceMethodCall(node_idx, fa, c, eff_sem.interface_type);
+                }
                 const obj = try self.lowerExpr(fa.object);
-                const decl_node = self.declNodeOfType(self.exprType(fa.object)) orelse {
+                const decl_node = self.declNodeOfType(obj_ty) orelse {
                     self.codegenError(node_idx, "method call on non-struct/class value", .{});
                     return self.ctx.buildIntConst(self.i64_ty, 0);
                 };
@@ -850,6 +1146,126 @@ pub const Lowerer = struct {
                 return self.ctx.buildIntConst(self.i64_ty, 0);
             },
         }
+    }
+
+    /// Lower an enum variant constructor (`Some(x)`): stack block with the
+    /// variant index in slot 0 and payloads after it.
+    fn lowerVariantInit(self: *Lowerer, vi: ast.EnumVariantInfo, c: anytype) !api.Value {
+        const variant = self.arena.get(vi.variant_node);
+        const payload_count = variant.enum_variant.fields.indices.len;
+        const block = try self.ctx.buildAllocaBytes(self.ptr_ty, class_mod.enumSizeFor(payload_count));
+        _ = try self.ctx.buildStore(self.i64_ty, block, try self.ctx.buildIntConst(self.i64_ty, @intCast(vi.index)));
+        for (c.args.indices, 0..) |arg_idx, i| {
+            const val = try self.lowerExpr(arg_idx);
+            const addr = try self.ctx.buildPtrAdd(self.ptr_ty, block, try self.ctx.buildIntConst(self.i64_ty, @intCast(class_mod.enumPayloadOffset(i))));
+            _ = try self.ctx.buildStore(self.i64_ty, addr, val);
+        }
+        return block;
+    }
+
+    /// Call through an `*impl Interface` fat pointer: data pointer as the
+    /// receiver, callee loaded from the interface-ordered vtable.
+    fn lowerIfaceMethodCall(self: *Lowerer, node_idx: NodeIdx, fa: anytype, c: anytype, iface_decl: NodeIdx) !api.Value {
+        const iface = self.arena.get(iface_decl).interface_decl;
+        const method_name = self.nameSlice(fa.field);
+        var method_index: ?u64 = null;
+        for (iface.methods.indices, 0..) |m_idx, i| {
+            const m = self.arena.get(m_idx);
+            if (m.* != .fn_decl) continue;
+            if (std.mem.eql(u8, self.nameSlice(m.fn_decl.name), method_name)) {
+                method_index = i;
+                break;
+            }
+        }
+        const mi = method_index orelse {
+            self.codegenError(node_idx, "no method '{s}' on this interface", .{method_name});
+            return self.ctx.buildIntConst(self.i64_ty, 0);
+        };
+
+        const fp = try self.lowerExpr(fa.object);
+        const data = try self.ctx.buildLoad(self.i64_ty, fp);
+        const vtable_addr = try self.ctx.buildPtrAdd(self.ptr_ty, fp, try self.ctx.buildIntConst(self.i64_ty, 8));
+        const vtable = try self.ctx.buildLoad(self.ptr_ty, vtable_addr);
+        const slot_addr = try self.ctx.buildPtrAdd(self.ptr_ty, vtable, try self.ctx.buildIntConst(self.i64_ty, @intCast(8 * mi)));
+        const callee = try self.ctx.buildLoad(self.ptr_ty, slot_addr);
+
+        var args = try self.lowerArgs(c.args);
+        defer args.deinit(self.gpa);
+        var all_args = std.ArrayList(api.Value).empty;
+        defer all_args.deinit(self.gpa);
+        try all_args.append(self.gpa, data);
+        try all_args.appendSlice(self.gpa, args.items);
+        return self.ctx.buildCallPtr(self.irTypeFor(self.checker.nodeType(node_idx)), callee, all_args.items);
+    }
+
+    /// For every argument whose parameter is an `*impl Interface`, wrap the
+    /// value into a fat pointer `{ data, vtable }` block. Structs and classes
+    /// get a synthetic vtable global in interface method order; values that
+    /// are already fat pointers pass through unchanged.
+    fn coerceInterfaceArgs(self: *Lowerer, node_idx: NodeIdx, fn_decl: NodeIdx, arg_nodes: NodeList, args: *std.ArrayList(api.Value)) !void {
+        const f = self.arena.get(fn_decl).fn_decl;
+        const count = @min(f.params.indices.len, args.items.len);
+        for (0..count) |i| {
+            const param = self.arena.get(f.params.indices[i]);
+            const param_ty = try self.paramType(param.param.ty);
+            const sem = self.type_pool.get(param_ty);
+            if (sem != .pointer) continue;
+            const iface_ty = self.type_pool.get(sem.pointer);
+            if (iface_ty != .interface_type) continue;
+
+            const arg_ty = self.exprType(arg_nodes.indices[i]);
+            const arg_sem = self.type_pool.get(arg_ty);
+            const ty_decl: NodeIdx = switch (arg_sem) {
+                .struct_type => |n| n,
+                .class_type => |n| n,
+                else => continue, // already a fat pointer (or invalid, caught by the checker)
+            };
+            const vtable = try self.ifaceVtableFor(node_idx, ty_decl, iface_ty.interface_type) orelse {
+                self.codegenError(node_idx, "cannot pass value as this interface: missing method", .{});
+                continue;
+            };
+            const fp = try self.ctx.buildAllocaBytes(self.ptr_ty, 16);
+            _ = try self.ctx.buildStore(self.i64_ty, fp, args.items[i]);
+            const vt_addr = try self.ctx.buildPtrAdd(self.ptr_ty, fp, try self.ctx.buildIntConst(self.i64_ty, 8));
+            _ = try self.ctx.buildStore(self.i64_ty, vt_addr, try self.ctx.buildGlobalAddr(self.ptr_ty, vtable));
+            args.items[i] = fp;
+        }
+    }
+
+    /// The interface-ordered vtable global for (type, interface), created on
+    /// first use and cached.
+    fn ifaceVtableFor(self: *Lowerer, node_idx: NodeIdx, ty_decl: NodeIdx, iface_decl: NodeIdx) !?api.GlobalIdx {
+        const key = IfaceVtableKey{ .ty = ty_decl, .iface = iface_decl };
+        if (self.iface_vtables.get(key)) |g| return g;
+        const table = self.methods.get(ty_decl) orelse {
+            self.codegenError(node_idx, "type has no methods", .{});
+            return null;
+        };
+        const iface = self.arena.get(iface_decl).interface_decl;
+        var funcs = std.ArrayList(api.FunctionIdx).empty;
+        defer funcs.deinit(self.gpa);
+        for (iface.methods.indices) |m_idx| {
+            const m = self.arena.get(m_idx);
+            if (m.* != .fn_decl) continue;
+            const entry = table.by_name.get(self.nameSlice(m.fn_decl.name)) orelse {
+                self.codegenError(node_idx, "type is missing interface method '{s}'", .{self.nameSlice(m.fn_decl.name)});
+                return null;
+            };
+            try funcs.append(self.gpa, entry.fidx);
+        }
+        const decl = self.arena.get(ty_decl);
+        const type_name: []const u8 = switch (decl.*) {
+            .struct_decl => |s| self.nameSlice(s.name),
+            .class_decl => |c| self.nameSlice(c.name),
+            else => return null,
+        };
+        const name = std.fmt.allocPrint(self.gpa, "vtable_{s}_{s}", .{ type_name, self.nameSlice(iface.name) }) catch return null;
+        defer self.gpa.free(name);
+        const g = self.ctx.addFnArrayGlobal(name, funcs.items) catch |err| {
+            std.debug.panic("OOM in codegen: {s}", .{@errorName(err)});
+        };
+        self.iface_vtables.put(self.gpa, key, g) catch {};
+        return g;
     }
 
     fn lowerArgs(self: *Lowerer, list: NodeList) !std.ArrayList(api.Value) {
@@ -1416,4 +1832,129 @@ test "lower: emit assembly for a module" {
     try std.testing.expect(std.mem.indexOf(u8, asm_text, "section .text") != null);
     try std.testing.expect(std.mem.indexOf(u8, asm_text, "_main:") != null);
     try std.testing.expect(std.mem.indexOf(u8, asm_text, "mov     rax, 42") != null);
+}
+
+test "lower: if expression produces a phi at the merge" {
+    var res = try checkLower(std.testing.allocator,
+        \\fn main() -> i32 {
+        \\    return if true { 1 } else { 2 }
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "phi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ret %") != null);
+}
+
+test "lower: match on enum with payload binding" {
+    var res = try checkLower(std.testing.allocator,
+        \\enum Option[i32] {
+        \\    None
+        \\    Some(i32)
+        \\}
+        \\fn main() -> i32 {
+        \\    mut x: Option[i32] = Some(7)
+        \\    match x {
+        \\        None => 0
+        \\        Some(n) => n * 2
+        \\    }
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "icmp eq") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ptr_add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "mul") != null);
+}
+
+test "lower: match expression as a value" {
+    var res = try checkLower(std.testing.allocator,
+        \\enum Color {
+        \\    Red
+        \\    Green
+        \\    Blue
+        \\}
+        \\fn main() -> i32 {
+        \\    mut c: Color = Blue
+        \\    return match c {
+        \\        Red => 1
+        \\        Green => 2
+        \\        Blue => 3
+        \\    }
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "phi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "icmp eq") != null);
+}
+
+test "lower: for...in iterates string bytes" {
+    var res = try checkLower(std.testing.allocator,
+        \\fn main() -> i32 {
+        \\    mut s: i32 = 0
+        \\    for c in "ab" {
+        \\        s = s + c
+        \\    }
+        \\    return s
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "icmp ult") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ptr_add") != null);
+}
+
+test "lower: string index access loads a byte" {
+    var res = try checkLower(std.testing.allocator,
+        \\fn main() -> i32 {
+        \\    return "ab"[1]
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ptr_add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "load") != null);
+}
+
+test "lower: interface method call dispatches through a vtable" {
+    var res = try checkLower(std.testing.allocator,
+        \\interface Shape {
+        \\    fn area(self: *Shape) -> i32
+        \\    fn name(self: *Shape) -> i32
+        \\}
+        \\struct Square {
+        \\    side: i32
+        \\    fn area(self: *Square) -> i32 {
+        \\        return self.side * self.side
+        \\    }
+        \\    fn name(self: *Square) -> i32 {
+        \\        return 1
+        \\    }
+        \\}
+        \\fn describe(s: *impl Shape) -> i32 {
+        \\    return s.area()
+        \\}
+        \\fn main() -> i32 {
+        \\    mut sq: Square = Square{ .side = 4 }
+        \\    return describe(sq)
+        \\}
+    );
+    defer res.deinit();
+
+    var buf: [8192]u8 = undefined;
+    const text = res.text(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "vtable_Square_Shape") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "call_ptr") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "store") != null);
 }

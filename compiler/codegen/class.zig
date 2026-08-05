@@ -79,6 +79,30 @@ pub fn generateVtable(gpa: Allocator, ctx: *api.Context, type_name: []const u8, 
     return ctx.addFnArrayGlobal(name, funcs);
 }
 
+// ============================================================================
+// Enums (tagged unions)
+// ============================================================================
+//
+// An enum value is a pointer to a stack block laid out as:
+//
+// ```text
+// [ tag: i64 ][ payload 0 ][ payload 1 ] ...
+// ```
+//
+// The tag is the variant's index in declaration order. Payload slots are
+// 8 bytes each, matching the backend's slot-based codegen. The block is
+// sized by the constructing variant's own payload count.
+
+pub const enum_tag_offset: u64 = 0;
+
+pub fn enumPayloadOffset(index: u64) u64 {
+    return 8 * (index + 1);
+}
+
+pub fn enumSizeFor(payload_count: u64) u32 {
+    return @intCast(8 * (payload_count + 1));
+}
+
 test "class layout: header plus 8-byte fields" {
     // Layout math is exercised indirectly through lower.zig's integration
     // tests; here we pin the constants.
