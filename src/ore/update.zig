@@ -1,6 +1,6 @@
 //! ore update — self-update from GitHub releases.
 //!
-//! ore bundles the Wolfram compiler pipeline, so installing a newer ore
+//! ore bundles the Wolframite compiler pipeline, so installing a newer ore
 //! binary also updates the compiler. ore fetches the rolling "dev" release
 //! (republished by CI on every commit) and swaps the current executable for
 //! the downloaded one.
